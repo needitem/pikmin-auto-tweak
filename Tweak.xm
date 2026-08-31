@@ -273,6 +273,24 @@ static bool hook_schedpick(void *self, void *pikId, void *mi) {
     return orig_schedpick(self, pikId, mi);
 }
 
+// Capture the live ExpeditionDataStore. It is the game's own registry of every
+// expedition the client knows about (available, in progress, returned), keyed by
+// task id; its values are ExpeditionItemData objects, which carry the game's own
+// eligibility/limit/start logic. Both mutator entry points are hooked because
+// AddData only fires the first time a task appears, while NotifyUpdate keeps
+// firing afterwards — either one hands us `self`.
+static void *gExpStore = NULL;                    // ExpeditionDataStore
+static void (*orig_expadd)(void*, void*, void*);
+static void hook_expadd(void *self, void *data, void *mi) {
+    if (self && !gExpStore) { gExpStore = self; PALOG(@"[capture] ExpeditionDataStore=%p (AddData)", self); }
+    orig_expadd(self, data, mi);
+}
+static void (*orig_expupd)(void*, void*, void*);
+static void hook_expupd(void *self, void *data, void *mi) {
+    if (self && !gExpStore) { gExpStore = self; PALOG(@"[capture] ExpeditionDataStore=%p (NotifyUpdate)", self); }
+    orig_expupd(self, data, mi);
+}
+
 static void pkInstallHooks(void) {
     static BOOL installed = NO;
     if (installed || !resolveAPI()) return;
@@ -311,6 +329,13 @@ static void pkInstallHooks(void) {
     if (mSchF) { void *fp = *(void**)mSchF; if (fp) f_MSHookFunction(fp, (void*)hook_schedfeed, (void**)&orig_schedfeed); }
     void *mSchP = actCls ? f_class_get_method_from_name(actCls, "SchedulePickPikminFlowerBatchedRequest", 1) : NULL;
     if (mSchP) { void *fp = *(void**)mSchP; if (fp) f_MSHookFunction(fp, (void*)hook_schedpick, (void**)&orig_schedpick); }
+    // Expedition data store — the source of every startable expedition.
+    void *edsCls = pkFindClass("Niantic.Ichigo.Game.Expedition.Data", "ExpeditionDataStore");
+    void *mEA = edsCls ? f_class_get_method_from_name(edsCls, "AddData", 1) : NULL;
+    void *mEU = edsCls ? f_class_get_method_from_name(edsCls, "NotifyUpdate", 1) : NULL;
+    if (mEA) { void *fp = *(void**)mEA; if (fp) f_MSHookFunction(fp, (void*)hook_expadd, (void**)&orig_expadd); }
+    if (mEU) { void *fp = *(void**)mEU; if (fp) f_MSHookFunction(fp, (void*)hook_expupd, (void**)&orig_expupd); }
+    PALOG(@"[hooks] edsCls=%p mEA=%p mEU=%p", edsCls, mEA, mEU);
     PALOG(@"[hooks] mFS=%p mFS2=%p mPS=%p mPS2=%p mSchF=%p mSchP=%p", mFS, mFS2, mPS, mPS2, mSchF, mSchP);
     installed = (mGP || mAU || mGK) != 0;
     PALOG(@"[hooks] rpcCls=%p mgrCls=%p mGP=%p mBA=%p mGF=%p mAU=%p mGK=%p focCls=%p mSF=%p installed=%d",
@@ -443,8 +468,15 @@ static NSArray *pkAllPikmin(void) {
         long long ts = 0x7fffffffffffffffLL;
         void *pl = *(void**)((char*)proto + 0xA0);
         if (pl) ts = *(long long*)((char*)pl + 0x18);
+        // PikminProto.statusCase_ @0xD0 — Available=1, Task=2 (busy on an
+        // expedition/carry), Entourage=32. starred_ @0x98 marks a favourite.
+        int status = *(int*)((char*)proto + 0xD0);
+        BOOL starred = *(unsigned char*)((char*)proto + 0x98) != 0;
         [out addObject:@{ @"id": [NSValue valueWithPointer:idStr],
                           @"proto": [NSValue valueWithPointer:proto],
+                          @"item": [NSValue valueWithPointer:item],
+                          @"status": @(status),
+                          @"starred": @(starred),
                           @"ts": @(ts) }];
     }
     [out sortUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) {
@@ -671,6 +703,198 @@ static NSString *collectPass(void) {
     return sent ? [NSString stringWithFormat:@"📦 원정 완료 요청 %d건", sent] : @"완료할 원정 없음";
 }
 
+// ---------- feature: auto-expedition (탐험) ----------
+//
+// Sends Pikmin on expeditions — the fruit/seedling/gift/postcard tasks, NOT
+// mushrooms. Every decision is made by the game's own code so the request we end
+// up sending is byte-for-byte the one the Go button would have sent:
+//
+//   ExpeditionDataStore.cache @0x18  Dictionary<string, IExpeditionDataStoreItem>
+//     └─ ExpeditionItemData      item @0x78 (PikminTaskInventoryItem), stats @0x80
+//          .Allows(PikminInventoryItem)  — honours the task's restriction
+//          .get_MaxPikminsAllowed()      — stats.Weight * 2 (or 1 if restricted)
+//          .get_CanTryStart()            — !Started && CarryingPower >= Weight
+//          .get_StartDisabledReason()    — non-null means the game would refuse
+//          .StartExpeditionAsync()       — builds StartExpeditionRequestProto
+//                                          {expeditionTaskId, pikminId[], currentLocation}
+//                                          and sends SendStartExpeditionRpc...
+//
+// Assigning Pikmin is what the panel's 자동 (auto-pick) button does: it writes the
+// chosen ids into PikminTaskProto.pikminId_ @0x28 and invalidates the cached
+// stats. We do exactly that (SetPikmins' own body), adding one Pikmin at a time
+// and asking the game after each whether the party is now strong enough — so the
+// party is the smallest one the game itself accepts.
+#define PK_TASK_EXPEDITION 6                      // PikminTaskProto.TaskOneofCase.Expedition
+#define PK_STATUS_AVAILABLE 1                     // PikminProto.StatusOneofCase.Available
+
+// Every ExpeditionItemData currently in the store.
+static NSArray *pkExpeditions(void) {
+    if (!gExpStore || !resolveAPI()) return nil;
+    void *dict = *(void**)((char*)gExpStore + 0x18);
+    if (!dict) return nil;
+    void *dcls = f_object_get_class(dict);
+    void *fE = dcls ? f_class_get_field_from_name(dcls, "_entries") : NULL;
+    if (!fE && dcls) fE = f_class_get_field_from_name(dcls, "entries");
+    void *fC = dcls ? f_class_get_field_from_name(dcls, "_count") : NULL;
+    if (!fC && dcls) fC = f_class_get_field_from_name(dcls, "count");
+    if (!fE || !fC) return nil;
+    void *entries = *(void**)((char*)dict + f_field_get_offset(fE));
+    int count = *(int*)((char*)dict + f_field_get_offset(fC));
+    if (!entries || count <= 0 || count > 100000) return nil;
+    // The store also holds blockers (mushroom invites) and fakes, so keep only
+    // the real ExpeditionItemData objects.
+    void *eidCls = pkFindClass("Niantic.Ichigo.Game.Expedition.Data", "ExpeditionItemData");
+    if (!eidCls) return nil;
+    char *data = (char*)entries + 0x20;
+    NSMutableArray *out = [NSMutableArray array];
+    for (int i = 0; i < count; i++) {
+        void *v = *(void**)(data + (size_t)i * 0x18 + 0x10);
+        if (!v || f_object_get_class(v) != eidCls) continue;
+        [out addObject:[NSValue valueWithPointer:v]];
+    }
+    return out;
+}
+
+// Write pikmin ids straight into the task proto's RepeatedField<string> and tell
+// the item data to drop its cached stats — this is the body of
+// ExpeditionItemData.SetPikmins, minus its "already started" guard (we only ever
+// call it on tasks we have just confirmed are unstarted).
+static void pkAssignPikmins(void *itemData, NSArray<NSValue *> *ids) {
+    void *inv = *(void**)((char*)itemData + 0x78);            // PikminTaskInventoryItem
+    if (!inv) return;
+    void *proto = pkInvoke(pkMethod(f_object_get_class(inv), "get_Proto", 0), inv, NULL);
+    if (!proto) return;
+    void *rf = *(void**)((char*)proto + 0x28);                // PikminTaskProto.pikminId_
+    if (!rf) return;
+    void *rfCls = f_object_get_class(rf);
+    pkInvoke(pkMethod(rfCls, "Clear", 0), rf, NULL);
+    void *mAdd = pkMethod(rfCls, "Add", 1);
+    for (NSValue *v in ids) { void *a[1] = { [v pointerValue] }; pkInvoke(mAdd, rf, a); }
+    pkInvoke(pkMethod(f_object_get_class(itemData), "InvalidateAllCachedValues", 0), itemData, NULL);
+}
+
+static BOOL pkBoolProp(void *obj, const char *name) {
+    void *r = pkInvoke(pkMethod(f_object_get_class(obj), name, 0), obj, NULL);
+    // il2cpp boxes value-type returns; the payload sits right after the header.
+    return r ? (*(unsigned char*)((char*)r + 0x10) != 0) : NO;
+}
+static int pkIntProp(void *obj, const char *name) {
+    void *r = pkInvoke(pkMethod(f_object_get_class(obj), name, 0), obj, NULL);
+    return r ? *(int*)((char*)r + 0x10) : 0;
+}
+
+// Candidate Pikmin for an expedition: idle (status Available), not starred, and
+// not part of the deployed troop — the troop is left alone so the squad on the
+// map survives. Oldest first, matching the auto-picker's "from the start of the
+// list" behaviour.
+static NSArray *pkExpeditionCandidates(void) {
+    NSArray *all = pkAllPikmin();                  // already sorted by pluck time
+    if (!all.count) return nil;
+    NSMutableSet<NSString *> *inTroop = [NSMutableSet set];
+    for (NSDictionary *d in pkSquad() ?: @[]) {
+        NSString *sid = pkStr([d[@"id"] pointerValue]);
+        if (sid) [inTroop addObject:sid];
+    }
+    NSMutableArray *out = [NSMutableArray array];
+    // Census, so a zero-candidate pass says WHICH filter emptied it rather than
+    // just "none". Printed once per pass while the toggle is on.
+    NSCountedSet *statuses = [NSCountedSet set];
+    int nStarred = 0, nTroop = 0;
+    for (NSDictionary *d in all) {
+        [statuses addObject:d[@"status"]];
+        if ([d[@"status"] intValue] != PK_STATUS_AVAILABLE) continue;   // busy already
+        if ([d[@"starred"] boolValue]) { nStarred++; continue; }        // keep favourites home
+        NSString *sid = pkStr([d[@"id"] pointerValue]);
+        if (sid && [inTroop containsObject:sid]) { nTroop++; continue; }
+        [out addObject:d];
+    }
+    if (!out.count) {
+        NSMutableArray *bits = [NSMutableArray array];
+        for (NSNumber *k in [statuses.allObjects sortedArrayUsingSelector:@selector(compare:)])
+            [bits addObject:[NSString stringWithFormat:@"status%@=%lu", k, (unsigned long)[statuses countForObject:k]]];
+        PALOG(@"[탐험] 후보0 — 전체 %lu, %@, 즐겨찾기제외 %d, 부대제외 %d, 부대원 %lu",
+              (unsigned long)all.count, [bits componentsJoinedByString:@" "],
+              nStarred, nTroop, (unsigned long)inTroop.count);
+    }
+    return out;
+}
+
+// One expedition per pass, so the request rate stays ordinary and the log reads
+// one line per send-off.
+static NSString *expeditionPass(void) {
+    if (!gExpStore) return @"탐험 목록 대기 (지도에 탐험이 보이면 잡힘)";
+    NSArray *exps = pkExpeditions();
+    if (!exps.count) return @"탐험 없음";
+    // Census of what the store holds, so "nothing sent" can be told apart from
+    // "nothing startable is in the store".
+    {
+        int nExp = 0, nIdle = 0;
+        for (NSValue *ev in exps) {
+            void *d = [ev pointerValue];
+            void *inv = *(void**)((char*)d + 0x78);
+            void *pr = inv ? pkInvoke(pkMethod(f_object_get_class(inv), "get_Proto", 0), inv, NULL) : NULL;
+            if (!pr) continue;
+            if (*(int*)((char*)pr + 0x50) != PK_TASK_EXPEDITION) continue;
+            nExp++;
+            if (*(long long*)((char*)pr + 0x18) == 0) nIdle++;
+        }
+        PALOG(@"[탐험] 스토어 %lu건 / 탐험 %d건 / 미출발 %d건",
+              (unsigned long)exps.count, nExp, nIdle);
+    }
+    NSArray *cands = pkExpeditionCandidates();
+    if (!cands.count) return @"보낼 피크민 없음";
+
+    int seen = 0;
+    for (NSValue *ev in exps) {
+        void *d = [ev pointerValue];
+        void *inv = *(void**)((char*)d + 0x78);
+        if (!inv) continue;
+        void *proto = pkInvoke(pkMethod(f_object_get_class(inv), "get_Proto", 0), inv, NULL);
+        if (!proto) continue;
+        if (*(int*)((char*)proto + 0x50) != PK_TASK_EXPEDITION) continue;  // taskCase_
+        if (*(long long*)((char*)proto + 0x18) != 0) continue;             // startTimeMs_ — running
+        seen++;
+        void *dCls = f_object_get_class(d);
+        // The game's own veto (out of range, inventory full, feature locked, …).
+        void *why = pkInvoke(pkMethod(dCls, "get_StartDisabledReason", 0), d, NULL);
+        if (why) { PALOG(@"[탐험] 건너뜀 — %@", pkStr(why) ?: @"불가"); continue; }
+
+        int maxN = pkIntProp(d, "get_MaxPikminsAllowed");
+        if (maxN <= 0) continue;
+        void *mAllows = pkMethod(dCls, "Allows", 1);
+
+        NSMutableArray<NSValue *> *picked = [NSMutableArray array];
+        BOOL ready = NO;
+        for (NSDictionary *c in cands) {
+            if ((int)picked.count >= maxN) break;
+            void *item = [c[@"item"] pointerValue];
+            if (mAllows) {
+                void *a[1] = { item };
+                void *r = pkInvoke(mAllows, d, a);
+                if (!r || *(unsigned char*)((char*)r + 0x10) == 0) continue;   // restricted task
+            }
+            [picked addObject:c[@"id"]];
+            pkAssignPikmins(d, picked);
+            // CanTryStart == !Started && CarryingPower >= Weight, both recomputed
+            // by the game from the party we just assigned.
+            if (pkBoolProp(d, "get_CanTryStart")) { ready = YES; break; }
+        }
+        if (!ready) {
+            pkAssignPikmins(d, @[]);            // leave the local proto as we found it
+            PALOG(@"[탐험] 힘 부족 — 후보 %lu, 최대 %d", (unsigned long)cands.count, maxN);
+            continue;
+        }
+        void *mStart = pkMethod(dCls, "StartExpeditionAsync", 0);
+        if (!mStart) { pkAssignPikmins(d, @[]); return @"StartExpeditionAsync 없음"; }
+        pkInvoke(mStart, d, NULL);
+        NSString *key = pkStr(pkInvoke(pkMethod(dCls, "get_Key", 0), d, NULL)) ?: @"?";
+        PALOG(@"[탐험] 출발 task=%@ 피크민 %lu마리 (최대 %d)", key, (unsigned long)picked.count, maxN);
+        return [NSString stringWithFormat:@"🚀 탐험 출발 — 피크민 %lu마리", (unsigned long)picked.count];
+    }
+    return seen ? [NSString stringWithFormat:@"보낼 수 있는 탐험 없음 (대기 %d건)", seen]
+                : @"대기 중인 탐험 없음";
+}
+
 // ---------- feature: auto-feed nectar ----------
 // Each pass feeds up to kFeedPerTick Pikmin one nectar each, cycling through the
 // nectar kinds we hold, until no nectar is left. Conservative batch size keeps
@@ -763,18 +987,20 @@ static NSString *feedPass(void) {
 
 static UIWindow *gWin = nil;
 static UILabel  *gToast = nil;
-static UIButton *gHarvestBtn = nil, *gCollectBtn = nil, *gFeedBtn = nil;
+static UIButton *gHarvestBtn = nil, *gCollectBtn = nil, *gFeedBtn = nil, *gExpedBtn = nil;
 static NSTimer  *gHarvestTimer = nil, *gCollectTimer = nil, *gFeedTimer = nil;
 static const NSTimeInterval kActionPace = 1.0;   // seconds between auto passes
 
 static NSString * const kHarvestKey = @"pa_harvest";
 static NSString * const kCollectKey = @"pa_collect";
 static NSString * const kFeedKey    = @"pa_feed";
+static NSString * const kExpedKey   = @"pa_expedition";
 
 // Suppress camera focus whenever any automation toggle is active.
 static void pkSyncFocus(void) {
     NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
-    gFocusSuppress = [d boolForKey:kHarvestKey] || [d boolForKey:kCollectKey] || [d boolForKey:kFeedKey];
+    gFocusSuppress = [d boolForKey:kHarvestKey] || [d boolForKey:kCollectKey] ||
+                     [d boolForKey:kFeedKey]    || [d boolForKey:kExpedKey];
 }
 
 @implementation PAOverlay
@@ -811,6 +1037,7 @@ static void pkSyncFocus(void) {
     if ([d boolForKey:kFeedKey])    PALOG(@"[feed] %@", feedPass());
     if ([d boolForKey:kHarvestKey]) PALOG(@"[harvest] %@", harvestPass());
     if ([d boolForKey:kCollectKey]) PALOG(@"[collect] %@", collectPass());
+    if ([d boolForKey:kExpedKey])   PALOG(@"[탐험] %@", expeditionPass());
 }
 
 + (void)toggleHarvest {
@@ -833,6 +1060,14 @@ static void pkSyncFocus(void) {
     [self styleBtn:gFeedBtn on:on base:@"정수"];
     pkSyncFocus();
     if (on) PALOG(@"[feed] %@", feedPass());
+}
+
++ (void)toggleExped {
+    BOOL on = ![[NSUserDefaults standardUserDefaults] boolForKey:kExpedKey];
+    [[NSUserDefaults standardUserDefaults] setBool:on forKey:kExpedKey];
+    [self styleBtn:gExpedBtn on:on base:@"탐험"];
+    pkSyncFocus();
+    if (on) PALOG(@"[탐험] %@", expeditionPass());
 }
 
 + (UIButton *)button:(NSString *)base y:(CGFloat)y sel:(SEL)sel key:(NSString *)key root:(UIView *)root width:(CGFloat)w {
@@ -878,6 +1113,7 @@ static void pkSyncFocus(void) {
     gFeedBtn    = [self button:@"정수"   y:64  sel:@selector(toggleFeed)    key:kFeedKey    root:root width:w];
     gHarvestBtn = [self button:@"수확"   y:104 sel:@selector(toggleHarvest) key:kHarvestKey root:root width:w];
     gCollectBtn = [self button:@"수집"   y:144 sel:@selector(toggleCollect) key:kCollectKey root:root width:w];
+    gExpedBtn   = [self button:@"탐험"   y:184 sel:@selector(toggleExped)   key:kExpedKey   root:root width:w];
 
     // Foreground automation driver — runs the enabled passes every kActionPace.
     // (Background execution was intentionally dropped; the app suspends when it is
@@ -890,7 +1126,7 @@ static void pkSyncFocus(void) {
     PALOG(@"[ui] overlay ready");
     __block int hb = 0;
     [NSTimer scheduledTimerWithTimeInterval:1.0 repeats:YES block:^(NSTimer *tm){
-        for (UIButton *b in @[gFeedBtn, gHarvestBtn, gCollectBtn])
+        for (UIButton *b in @[gFeedBtn, gHarvestBtn, gCollectBtn, gExpedBtn])
             if (b.superview) [b.superview bringSubviewToFront:b];
         if ([UIApplication sharedApplication].applicationState != UIApplicationStateActive) return;
         pkInstallHooks();
