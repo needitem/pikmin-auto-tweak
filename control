@@ -1,6 +1,6 @@
 Package: com.securitylab.pikminauto
 Name: Pikmin Auto
-Version: 0.5.1
+Version: 0.5.4
 Architecture: iphoneos-arm64
 Description: Own-device Pikmin Bloom automation — silently numbers all Pikmin in pluck order, and offers toggles to auto-harvest flower petals, auto-collect expedition rewards, auto-feed nectar, and auto-send Pikmin on expeditions (not mushrooms) through the game own RPCs.
 Author: security-lab

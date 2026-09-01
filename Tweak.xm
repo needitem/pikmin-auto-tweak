@@ -9,6 +9,8 @@
 //  • 🍯 자동 정수  — Stage-1 safe check: reads the nectar (HoneyBall) inventory
 //    and reports the count. Feeding is enabled once the read path is verified
 //    on-device (multi-offset read, done cautiously).
+//  • 🧭 자동 탐험  — starts the expeditions waiting in ExpeditionDataStore, with
+//    the party the game's own rules accept (see pkExpeditionCandidates).
 //
 // All actions go through the game's own server RPCs (RpcManager). Unity IL2CPP,
 // metadata v31 un-obfuscated, so classes/methods resolve by name at runtime.
@@ -26,6 +28,14 @@
 //   InventoryManager: List<PikminTaskInventoryItem> GetPikminTaskList(); storages hold
 //       base ItemStorage.Items = List<Predicted<InventoryItem>> @0x10; honeyBall storage @0x48
 //   HoneyBallProto: numBalls_ @0x18, honeyType_ @0x1C
+//   ExpeditionDataStore (…Game.Expedition.Data): cache Dictionary<string,…> @0x18;
+//       values are ExpeditionItemData{item(PikminTaskInventoryItem) @0x78, stats @0x80}
+//       with the game's own Allows()/CanTryStart/StartDisabledReason/StartExpeditionAsync
+//   PikminUtils (…Game.Pikmins): IsPikminInTroop(PikminProto, InventoryManager) — note the
+//       [Extension] overload takes the arguments the other way round, and
+//       class_get_method_from_name cannot tell them apart; GetPikminInTroopCount(InventoryManager)
+//   PikminInventoryTools (…Game.Pikmins): clientSettingsCache @0x18 → CurrentSettings →
+//       ClientSettingsProto.pikmin_ @0x78 → PikminSettingsProto.minTroopPikminCount_ @0x1C
 
 #import <UIKit/UIKit.h>
 #import <CoreLocation/CoreLocation.h>
@@ -291,6 +301,21 @@ static void hook_expupd(void *self, void *data, void *mi) {
     orig_expupd(self, data, mi);
 }
 
+// Capture PikminInventoryTools — the Zenject singleton that owns the game's own
+// troop-reservation rule. We only need the IClientSettingsCache it holds (@0x18)
+// to read the minimum troop size the game keeps back from expeditions.
+static void *gPikTools = NULL;                    // PikminInventoryTools
+static void (*orig_pitctor)(void*, void*, void*, void*, void*);
+static void hook_pitctor(void *self, void *a, void *b, void *c, void *mi) {
+    if (self && !gPikTools) { gPikTools = self; PALOG(@"[capture] PikminInventoryTools=%p (ctor)", self); }
+    orig_pitctor(self, a, b, c, mi);
+}
+static bool (*orig_pitin)(void*, void*, void*);
+static bool hook_pitin(void *self, void *pid, void *mi) {
+    if (self && !gPikTools) { gPikTools = self; PALOG(@"[capture] PikminInventoryTools=%p (inInv)", self); }
+    return orig_pitin(self, pid, mi);
+}
+
 static void pkInstallHooks(void) {
     static BOOL installed = NO;
     if (installed || !resolveAPI()) return;
@@ -329,6 +354,12 @@ static void pkInstallHooks(void) {
     if (mSchF) { void *fp = *(void**)mSchF; if (fp) f_MSHookFunction(fp, (void*)hook_schedfeed, (void**)&orig_schedfeed); }
     void *mSchP = actCls ? f_class_get_method_from_name(actCls, "SchedulePickPikminFlowerBatchedRequest", 1) : NULL;
     if (mSchP) { void *fp = *(void**)mSchP; if (fp) f_MSHookFunction(fp, (void*)hook_schedpick, (void**)&orig_schedpick); }
+    // PikminInventoryTools — reached for the game's own min-troop setting.
+    void *pitCls = pkFindClass("Niantic.Ichigo.Game.Pikmins", "PikminInventoryTools");
+    void *mPitC = pitCls ? f_class_get_method_from_name(pitCls, ".ctor", 3) : NULL;
+    void *mPitI = pitCls ? f_class_get_method_from_name(pitCls, "IsPikminInInventory", 1) : NULL;
+    if (mPitC) { void *fp = *(void**)mPitC; if (fp) f_MSHookFunction(fp, (void*)hook_pitctor, (void**)&orig_pitctor); }
+    if (mPitI) { void *fp = *(void**)mPitI; if (fp) f_MSHookFunction(fp, (void*)hook_pitin, (void**)&orig_pitin); }
     // Expedition data store — the source of every startable expedition.
     void *edsCls = pkFindClass("Niantic.Ichigo.Game.Expedition.Data", "ExpeditionDataStore");
     void *mEA = edsCls ? f_class_get_method_from_name(edsCls, "AddData", 1) : NULL;
@@ -726,6 +757,8 @@ static NSString *collectPass(void) {
 // party is the smallest one the game itself accepts.
 #define PK_TASK_EXPEDITION 6                      // PikminTaskProto.TaskOneofCase.Expedition
 #define PK_STATUS_AVAILABLE 1                     // PikminProto.StatusOneofCase.Available
+#define PK_STATUS_TASK      2                     // …Task — busy on an expedition/carry
+#define PK_STATUS_ENTOURAGE 32                    // …Entourage — walking with the player
 
 // Every ExpeditionItemData currently in the store.
 static NSArray *pkExpeditions(void) {
@@ -783,48 +816,130 @@ static int pkIntProp(void *obj, const char *name) {
     return r ? *(int*)((char*)r + 0x10) : 0;
 }
 
-// Candidate Pikmin for an expedition: idle (status Available), not starred, and
-// not part of the deployed troop — the troop is left alone so the squad on the
-// map survives. Oldest first, matching the auto-picker's "from the start of the
-// list" behaviour.
+// The minimum number of Pikmin the game itself keeps in the troop:
+// ClientSettingsProto.pikmin_ @0x78 -> PikminSettingsProto.minTroopPikminCount_ @0x1C
+// (the game defaults it to 1 when the field is unset).
+static int pkMinTroop(void) {
+    if (!gPikTools || !resolveAPI()) return 1;
+    void *csc = *(void**)((char*)gPikTools + 0x18);          // IClientSettingsCache
+    if (!csc) return 1;
+    void *cs = pkInvoke(pkMethod(f_object_get_class(csc), "get_CurrentSettings", 0), csc, NULL);
+    if (!cs) return 1;
+    void *ps = *(void**)((char*)cs + 0x78);                  // ClientSettingsProto.pikmin_
+    if (!ps) return 1;
+    int v = *(int*)((char*)ps + 0x1C);                       // minTroopPikminCount_
+    return v > 0 ? v : 1;
+}
+
+// Candidate Pikmin for an expedition, decided the way the game decides it.
+//
+// The old rule excluded every troop member outright, which emptied the list on a
+// large troop ("후보0 — … 부대제외 31, 부대원 60") and was simply not the game's
+// rule. PikminInventoryTools.ReservingPikminForTroop is:
+//
+//   if (HasUnrestrictedExpedition(onboarding)) reserve nothing
+//   needToReserve = count(eligible that are in troop) - GetPikminInTroopCount()
+//                   + GetMinTroopPikminCount(clientSettings)
+//   reserve the first needToReserve eligible troop members, send the rest
+//
+// i.e. troop Pikmin ARE sendable; the game only holds back enough of them to keep
+// the troop at its minimum size. Troop membership and the troop count come from
+// the game's own PikminUtils, not from playerFollowingPikmins.
+//
+// Busy Pikmin (status Task — already on an expedition or a carry) are the only
+// hard exclusion; favourites are kept home as a courtesy, as before.
 static NSArray *pkExpeditionCandidates(void) {
     NSArray *all = pkAllPikmin();                  // already sorted by pluck time
     if (!all.count) return nil;
-    NSMutableSet<NSString *> *inTroop = [NSMutableSet set];
-    for (NSDictionary *d in pkSquad() ?: @[]) {
-        NSString *sid = pkStr([d[@"id"] pointerValue]);
-        if (sid) [inTroop addObject:sid];
+    void *inv = gInv();
+    void *utilCls = pkFindClass("Niantic.Ichigo.Game.Pikmins", "PikminUtils");
+    void *mInTroop  = pkMethod(utilCls, "IsPikminInTroop", 2);        // (InventoryManager, PikminProto)
+    void *mTroopCnt = pkMethod(utilCls, "GetPikminInTroopCount", 1);  // (InventoryManager)
+
+    int troopTotal = 0;
+    if (inv && mTroopCnt) {
+        void *a[1] = { inv };
+        void *r = pkInvoke(mTroopCnt, NULL, a);
+        if (r) troopTotal = *(int*)((char*)r + 0x10);
     }
-    NSMutableArray *out = [NSMutableArray array];
-    // Census, so a zero-candidate pass says WHICH filter emptied it rather than
-    // just "none". Printed once per pass while the toggle is on.
+
+    // PikminUtils declares IsPikminInTroop twice — (PikminProto, InventoryManager)
+    // and the [Extension] (InventoryManager, PikminProto). class_get_method_from_name
+    // matches on name+argc only, so which one comes back is not knowable up front and
+    // the wrong argument order silently answers "not in troop" for everybody (the
+    // 0.5.2 run logged "부대원 포함 0" against a troop of 33). Ask both ways and keep
+    // the ordering whose tally actually agrees with GetPikminInTroopCount; the status
+    // flag (Entourage) is the fallback if neither call is available.
+    NSMutableArray *pool = [NSMutableArray array];
     NSCountedSet *statuses = [NSCountedSet set];
-    int nStarred = 0, nTroop = 0;
+    int nStarred = 0, nBusy = 0, nPI = 0, nIP = 0, nEnt = 0;
     for (NSDictionary *d in all) {
         [statuses addObject:d[@"status"]];
-        if ([d[@"status"] intValue] != PK_STATUS_AVAILABLE) continue;   // busy already
+        int st = [d[@"status"] intValue];
+        if (st == PK_STATUS_TASK || st == 0) { nBusy++; continue; }     // busy / no status
         if ([d[@"starred"] boolValue]) { nStarred++; continue; }        // keep favourites home
-        NSString *sid = pkStr([d[@"id"] pointerValue]);
-        if (sid && [inTroop containsObject:sid]) { nTroop++; continue; }
+        void *proto = [d[@"proto"] pointerValue];
+        BOOL pi = NO, ip = NO;
+        if (inv && mInTroop) {
+            void *a1[2] = { proto, inv };
+            void *r1 = pkInvoke(mInTroop, NULL, a1);
+            pi = r1 && *(unsigned char*)((char*)r1 + 0x10) != 0;
+            void *a2[2] = { inv, proto };
+            void *r2 = pkInvoke(mInTroop, NULL, a2);
+            ip = r2 && *(unsigned char*)((char*)r2 + 0x10) != 0;
+        }
+        if (pi) nPI++;
+        if (ip) nIP++;
+        if (st == PK_STATUS_ENTOURAGE) nEnt++;
+        NSMutableDictionary *e = [d mutableCopy];
+        e[@"troopPI"] = @(pi); e[@"troopIP"] = @(ip);
+        [pool addObject:e];
+    }
+    // Whichever tally lands closest to the game's own troop count wins.
+    NSString *troopKey = @"troopPI"; int poolInTroop = nPI;
+    if (abs(nIP - troopTotal) < abs(nPI - troopTotal)) { troopKey = @"troopIP"; poolInTroop = nIP; }
+    if (troopTotal > 0 && poolInTroop == 0 && nEnt > 0) { troopKey = nil; poolInTroop = nEnt; }
+    for (NSMutableDictionary *e in pool)
+        e[@"troop"] = troopKey ? e[troopKey] : @([e[@"status"] intValue] == PK_STATUS_ENTOURAGE);
+
+    // The game's own reservation arithmetic. Non-eligible troop members already
+    // satisfy part of the minimum, so only the shortfall is held back.
+    int minTroop = pkMinTroop();
+    int need = poolInTroop - troopTotal + minTroop;
+    NSMutableArray *out = [NSMutableArray array];
+    int held = 0;
+    for (NSDictionary *d in pool) {
+        if (need > 0 && held < need && [d[@"troop"] boolValue]) { held++; continue; }
         [out addObject:d];
     }
+
     if (!out.count) {
         NSMutableArray *bits = [NSMutableArray array];
         for (NSNumber *k in [statuses.allObjects sortedArrayUsingSelector:@selector(compare:)])
             [bits addObject:[NSString stringWithFormat:@"status%@=%lu", k, (unsigned long)[statuses countForObject:k]]];
-        PALOG(@"[탐험] 후보0 — 전체 %lu, %@, 즐겨찾기제외 %d, 부대제외 %d, 부대원 %lu",
+        PALOG(@"[탐험] 후보0 — 전체 %lu, %@, 작업중제외 %d, 즐겨찾기제외 %d, 부대유보 %d/%d (부대 %d[%@], 최소 %d)",
               (unsigned long)all.count, [bits componentsJoinedByString:@" "],
-              nStarred, nTroop, (unsigned long)inTroop.count);
+              nBusy, nStarred, held, need, troopTotal, troopKey ?: @"ent", minTroop);
+    } else {
+        PALOG(@"[탐험] 후보 %lu마리 (부대원 포함 %d[%@ pi=%d ip=%d ent=%d], 부대유보 %d, 부대 %d, 최소 %d)",
+              (unsigned long)out.count, poolInTroop, troopKey ?: @"ent", nPI, nIP, nEnt,
+              held, troopTotal, minTroop);
     }
     return out;
 }
 
+// Tasks we have already sent this session, keyed by ExpeditionItemData.Key, with
+// the time we sent them — see the cooldown check below.
+static NSMutableDictionary<NSString *, NSNumber *> *gExpSent = nil;
+static const NSTimeInterval kExpCooldown = 30.0;
+
 // One expedition per pass, so the request rate stays ordinary and the log reads
 // one line per send-off.
 static NSString *expeditionPass(void) {
-    if (!gExpStore) return @"탐험 목록 대기 (지도에 탐험이 보이면 잡힘)";
+    if (!gExpSent) gExpSent = [NSMutableDictionary dictionary];
+    if (!gExpStore) { PALOG(@"[탐험] 스토어 미포착 — 지도에 탐험이 뜨면 잡힘"); return @"탐험 목록 대기 (지도에 탐험이 보이면 잡힘)"; }
     NSArray *exps = pkExpeditions();
-    if (!exps.count) return @"탐험 없음";
+    if (!exps.count) { PALOG(@"[탐험] 스토어 비어 있음"); return @"탐험 없음"; }
     // Census of what the store holds, so "nothing sent" can be told apart from
     // "nothing startable is in the store".
     {
@@ -855,9 +970,20 @@ static NSString *expeditionPass(void) {
         if (*(long long*)((char*)proto + 0x18) != 0) continue;             // startTimeMs_ — running
         seen++;
         void *dCls = f_object_get_class(d);
-        // The game's own veto (out of range, inventory full, feature locked, …).
-        void *why = pkInvoke(pkMethod(dCls, "get_StartDisabledReason", 0), d, NULL);
-        if (why) { PALOG(@"[탐험] 건너뜀 — %@", pkStr(why) ?: @"불가"); continue; }
+        // startTimeMs_ only flips once the server has answered, so a second pass
+        // inside that round trip sees the task as still unstarted and sends it
+        // again — which is exactly what happened when the toggle's immediate pass
+        // and the next timer tick landed 0.13s apart. Remember what we just sent.
+        NSString *tkey = pkStr(pkInvoke(pkMethod(dCls, "get_Key", 0), d, NULL));
+        if (tkey) {
+            NSNumber *when = gExpSent[tkey];
+            if (when && [NSDate date].timeIntervalSince1970 - when.doubleValue < kExpCooldown) continue;
+        }
+        void *mWhy = pkMethod(dCls, "get_StartDisabledReason", 0);
+        // StartDisabledReason is recomputed from the party currently assigned, so
+        // asking it BEFORE assigning anybody always answered "이 아이템을 운반하려면
+        // 피크민의 전체 힘이 더 강해져야 합니다" and every heavy expedition was skipped
+        // forever. It is now asked once the party is picked, below.
 
         int maxN = pkIntProp(d, "get_MaxPikminsAllowed");
         if (maxN <= 0) continue;
@@ -881,13 +1007,23 @@ static NSString *expeditionPass(void) {
         }
         if (!ready) {
             pkAssignPikmins(d, @[]);            // leave the local proto as we found it
-            PALOG(@"[탐험] 힘 부족 — 후보 %lu, 최대 %d", (unsigned long)cands.count, maxN);
+            PALOG(@"[탐험] 힘 부족 — 후보 %lu, 뽑음 %lu, 최대 %d",
+                  (unsigned long)cands.count, (unsigned long)picked.count, maxN);
+            continue;
+        }
+        // Now that a party is assigned, the game's own veto is meaningful: out of
+        // range, inventory full, feature locked, still not strong enough, …
+        void *why = pkInvoke(mWhy, d, NULL);
+        if (why) {
+            pkAssignPikmins(d, @[]);
+            PALOG(@"[탐험] 건너뜀 — %@", pkStr(why) ?: @"불가");
             continue;
         }
         void *mStart = pkMethod(dCls, "StartExpeditionAsync", 0);
         if (!mStart) { pkAssignPikmins(d, @[]); return @"StartExpeditionAsync 없음"; }
         pkInvoke(mStart, d, NULL);
-        NSString *key = pkStr(pkInvoke(pkMethod(dCls, "get_Key", 0), d, NULL)) ?: @"?";
+        NSString *key = tkey ?: @"?";
+        if (tkey) gExpSent[tkey] = @([NSDate date].timeIntervalSince1970);
         PALOG(@"[탐험] 출발 task=%@ 피크민 %lu마리 (최대 %d)", key, (unsigned long)picked.count, maxN);
         return [NSString stringWithFormat:@"🚀 탐험 출발 — 피크민 %lu마리", (unsigned long)picked.count];
     }
@@ -1067,7 +1203,7 @@ static void pkSyncFocus(void) {
     [[NSUserDefaults standardUserDefaults] setBool:on forKey:kExpedKey];
     [self styleBtn:gExpedBtn on:on base:@"탐험"];
     pkSyncFocus();
-    if (on) PALOG(@"[탐험] %@", expeditionPass());
+    if (on) [PAOverlay runDue];     // via the throttle, so the next tick does not re-run it
 }
 
 + (UIButton *)button:(NSString *)base y:(CGFloat)y sel:(SEL)sel key:(NSString *)key root:(UIView *)root width:(CGFloat)w {
