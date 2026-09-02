@@ -780,51 +780,119 @@ static NSString *harvestPass(void) {
     return ok ? [NSString stringWithFormat:@"🌸 수확(RPC) %lu마리 — gAction 미포착", (unsigned long)ids.count] : @"🌸 수확 전송 실패";
 }
 
-// ---------- feature: collect expedition rewards (complete returned tasks) ----------
-// Decided by the game's own state machine: ExpeditionDataStore holds an
-// ExpeditionItemData per task and its State (Available 0, Outgoing 1, AtSpawn 2,
-// Incoming 3, Returned 4) is what the panel's 회수 button reads. Only Returned
-// tasks get CompletePikminTask. The earlier version fired it at every task in
-// the inventory once a second, ready or not — a pointless request storm.
+// ---------- feature: 수집 — take what the Pikmin are carrying ----------
+//
+// Pikmin come home holding things: fruit and seedlings they carried, gifts,
+// postcards. Each is a PikminTask in the inventory and each is claimed with
+// CompletePikminTask — this is the game's 수집 button.
+//
+// PikminTaskProto.TaskOneofCase @0x50: 1 Carry, 6 Expedition, 8 Gift,
+// 9 PoiChallenge. startTimeMs_ @0x18, finishTimeMs_ @0x20.
+//
+// An earlier cut narrowed this to expeditions the ExpeditionDataStore marked
+// Returned, which dropped Carry and Gift tasks entirely — the very things a
+// Pikmin is holding — and collection stopped. The task list is the right
+// source: everything claimable is in it.
+#define PK_TASK_CARRY       1
+#define PK_TASK_EXPEDITION  6
+#define PK_TASK_GIFT        8
+#define PK_TASK_POICHALLENGE 9
 static void *pkItemProto(void *item);
 static NSArray *pkExpeditions(void);
 static int pkIntProp(void *obj, const char *name);
-#define PK_EXP_RETURNED 4
+#define PK_EXP_RETURNED 4                          // ExpeditionState.Returned
 static NSMutableDictionary<NSString *, NSNumber *> *gCollectSent = nil;
+static NSMutableDictionary<NSString *, NSNumber *> *gCollectTries = nil;
 static NSString *collectPass(void) {
     void *inv = gInv();
     if (!inv || !gRpc) return @"인벤토리/서버 준비 대기";
-    if (!gExpStore) return @"탐험 스토어 대기 (지도가 뜨면 잡힘)";
-    if (!gCollectSent) gCollectSent = [NSMutableDictionary dictionary];
-    NSArray *exps = pkExpeditions();
-    if (!exps.count) return @"탐험 없음";
-    int sent = 0, byState[8] = {0};
-    NSTimeInterval now = [NSDate date].timeIntervalSince1970;
-    void *tCls = pkFindClass("Ichigo.Proto", "CompletePikminTaskRequestProto");
-    for (NSValue *ev in exps) {
+    if (!gCollectSent)  gCollectSent  = [NSMutableDictionary dictionary];
+    if (!gCollectTries) gCollectTries = [NSMutableDictionary dictionary];
+    void *list = pkInvoke(pkMethod(f_object_get_class(inv), "GetPikminTaskList", 0), inv, NULL);
+    if (!list) return @"태스크 목록 없음";
+    int size = *(int*)((char*)list + 0x18);            // List<T>._size
+    void *arr = *(void**)((char*)list + 0x10);         // List<T>._items
+    if (!arr || size <= 0 || size > 100000) return @"수집할 것 없음";
+    char *adata = (char*)arr + 0x20;
+
+    // An expedition is only claimable once the game's own state machine says
+    // Returned. Its finish time passing is not enough — the Pikmin still have
+    // to walk home, and the server refuses a completion until they have
+    // (measured: 7 of 7 expedition completions refused on the finish-time
+    // rule alone, while carried items went through). Collect the task ids the
+    // store marks Returned and require expeditions to be among them.
+    NSMutableSet<NSString *> *returned = [NSMutableSet set];
+    for (NSValue *ev in pkExpeditions()) {
         void *d = [ev pointerValue];
-        int st = pkIntProp(d, "get_State");
-        if (st >= 0 && st < 8) byState[st]++;
-        if (st != PK_EXP_RETURNED) continue;
-        void *item = *(void**)((char*)d + 0x78);              // PikminTaskInventoryItem
-        void *idStr = item ? pkInvoke(pkMethod(f_object_get_class(item), "get_Id", 0), item, NULL) : NULL;
-        if (!idStr) continue;
+        if (pkIntProp(d, "get_State") != PK_EXP_RETURNED) continue;
+        void *ei = *(void**)((char*)d + 0x78);
+        void *eid = ei ? pkInvoke(pkMethod(f_object_get_class(ei), "get_Id", 0), ei, NULL) : NULL;
+        NSString *s = pkStr(eid);
+        if (s.length) [returned addObject:s];
+    }
+
+    void *tCls = pkFindClass("Ichigo.Proto", "CompletePikminTaskRequestProto");
+    long long nowMs = (long long)([NSDate date].timeIntervalSince1970 * 1000.0);
+    NSTimeInterval now = [NSDate date].timeIntervalSince1970;
+    int sent = 0, running = 0, idle = 0, ready = 0;
+    NSCountedSet *kinds = [NSCountedSet set];
+
+    for (int i = 0; i < size; i++) {
+        void *item = *(void**)(adata + (size_t)i * 8);
+        if (!item) continue;
+        void *idStr = pkInvoke(pkMethod(f_object_get_class(item), "get_Id", 0), item, NULL);
+        void *proto = pkItemProto(item);
+        if (!idStr || !proto) continue;
+        int kase       = *(int*)((char*)proto + 0x50);
+        long long stMs = *(long long*)((char*)proto + 0x18);
+        long long finMs = *(long long*)((char*)proto + 0x20);
+        [kinds addObject:@(kase)];
+
         NSString *tid = pkStr(idStr) ?: @"";
+        if (kase == PK_TASK_EXPEDITION) {
+            // Sent or not, an expedition is the 탐험 pass's business until the
+            // game says the Pikmin are home.
+            if (stMs == 0) { idle++; continue; }
+            if (![returned containsObject:tid]) { running++; continue; }
+        } else if (finMs > nowMs) {
+            running++; continue;             // still being carried home
+        }
+        ready++;
+
         NSNumber *when = gCollectSent[tid];
-        if (when && now - when.doubleValue < 60.0) continue;    // answer pending
+        int tries = [gCollectTries[tid] intValue];
+        // A task the server keeps refusing waits longer each time, up to 10 min.
+        NSTimeInterval wait = MIN(30.0 * (tries > 0 ? (1 << MIN(tries, 5)) : 1), 600.0);
+        if (when && now - when.doubleValue < wait) continue;
+
         void *req = tCls ? f_object_new(tCls) : NULL;
         if (!req) continue;
         void *ctor = pkMethod(tCls, ".ctor", 0);
         if (ctor) pkInvoke(ctor, req, NULL);
         *(void**)((char*)req + 0x18) = idStr;          // pikminTaskId_
         if (pkSendRpc("SendCompletePikminTaskRpcForResultAsync", req)) {
-            sent++; gCollectSent[tid] = @(now);
-            PALOG(@"[collect] 회수 task=%@", tid);
+            sent++;
+            gCollectSent[tid] = @(now);
+            gCollectTries[tid] = @(tries + 1);
+            PALOG(@"[collect] 수집 요청 종류%d task=%@%@", kase, tid,
+                  tries ? [NSString stringWithFormat:@" (%d번째)", tries + 1] : @"");
         }
-        if (sent >= 5) break;
+        if (sent >= 5) break;                          // a handful per pass
     }
-    return [NSString stringWithFormat:@"📦 회수 요청 %d건 (대기 %d, 출발 %d, 현장 %d, 귀환중 %d, 귀환 %d)",
-            sent, byState[0], byState[1], byState[2], byState[3], byState[4]];
+    // Tasks that have gone away were collected; stop remembering them.
+    if (gCollectSent.count > 200) { [gCollectSent removeAllObjects]; [gCollectTries removeAllObjects]; }
+
+    NSMutableArray *cen = [NSMutableArray array];
+    for (NSNumber *k in [kinds.allObjects sortedArrayUsingSelector:@selector(compare:)]) {
+        NSString *name = k.intValue == PK_TASK_CARRY ? @"운반" :
+                         k.intValue == PK_TASK_EXPEDITION ? @"탐험" :
+                         k.intValue == PK_TASK_GIFT ? @"선물" :
+                         k.intValue == PK_TASK_POICHALLENGE ? @"버섯" :
+                         [NSString stringWithFormat:@"종류%@", k];
+        [cen addObject:[NSString stringWithFormat:@"%@ %lu", name, (unsigned long)[kinds countForObject:k]]];
+    }
+    return [NSString stringWithFormat:@"📦 수집 요청 %d건 / 수령가능 %d, 진행중 %d, 미출발 %d [%@]",
+            sent, ready, running, idle, [cen componentsJoinedByString:@", "]];
 }
 
 // ---------- feature: auto-expedition (탐험) ----------
@@ -848,7 +916,7 @@ static NSString *collectPass(void) {
 // stats. We do exactly that (SetPikmins' own body), adding one Pikmin at a time
 // and asking the game after each whether the party is now strong enough — so the
 // party is the smallest one the game itself accepts.
-#define PK_TASK_EXPEDITION 6                      // PikminTaskProto.TaskOneofCase.Expedition
+// PK_TASK_EXPEDITION is defined with the other task kinds above.
 #define PK_STATUS_AVAILABLE 1                     // PikminProto.StatusOneofCase.Available
 #define PK_STATUS_TASK      2                     // …Task — busy on an expedition/carry
 #define PK_STATUS_ENTOURAGE 32                    // …Entourage — walking with the player
