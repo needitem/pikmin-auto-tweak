@@ -1505,8 +1505,11 @@ static NSString *seedPass(void) {
         int req = *(int*)((char*)proto + 0x50), cur = *(int*)((char*)proto + 0x54);
         float bonus = *(float*)((char*)proto + 0x58);
         long long planted = *(long long*)((char*)proto + 0x60);
+        void *birth = *(void**)((char*)proto + 0x28);          // birthPlacePoint_
         NSDictionary *d = @{ @"idp": [NSValue valueWithPointer:idp], @"id": pkStr(idp) ?: @"",
-                             @"req": @(req), @"cur": @(cur), @"bonus": @(bonus) };
+                             @"req": @(req), @"cur": @(cur), @"bonus": @(bonus),
+                             @"blat": @(birth ? *(double*)((char*)birth + 0x18) : 0),
+                             @"blng": @(birth ? *(double*)((char*)birth + 0x20) : 0) };
         if (planted > 0) { nPlanted++; if (req > 0 && cur + (int)bonus >= req) [ripe addObject:d]; }
         else [waiting addObject:d];
     });
@@ -1558,19 +1561,19 @@ static NSString *seedPass(void) {
             if (set >= (int)freeSlots.count) break;
             NSNumber *when = gSeedSent[d[@"id"]];
             if (when && now - when.doubleValue < kSeedRetry) continue;
+            // Exactly the request the game's own planter sends (captured with
+            // [seedRPC]): seedId, point = the seed's birth place, NO slot option
+            // — the server picks the slot. Ours with slotIndex + current position
+            // was silently refused.
             void *cls = NULL;
             void *req = pkNewReq("SetPikminSeedRequestProto", &cls);
             if (!req) break;
+            double blat = [d[@"blat"] doubleValue], blng = [d[@"blng"] doubleValue];
+            if (blat == 0 && blng == 0) { blat = gLastLoc.coordinate.latitude; blng = gLastLoc.coordinate.longitude; }
             *(void**)((char*)req + 0x18) = [d[@"idp"] pointerValue];                 // seedId_
-            *(void**)((char*)req + 0x20) = pkNewPoint(gLastLoc.coordinate.latitude,
-                                                      gLastLoc.coordinate.longitude);   // point_
-            void *soCls = pkNestedClass(cls, "SlotOptionProto");
-            void *so = pkNewObj(soCls);
-            if (!so) { PALOG(@"[모종] SlotOptionProto 클래스 못 찾음"); break; }
-            *(int*)((char*)so + 0x18) = [freeSlots[set] intValue];                    // slotIndex_
-            *(void**)((char*)req + 0x28) = so;                                         // slotOption_
+            *(void**)((char*)req + 0x20) = pkNewPoint(blat, blng);                    // point_
             lastTry = now; plantedAtTry = nPlanted;
-            if (pkSendRpc("SendSetPikminSeedRpcForResultAsync", req)) {
+            if (pkSendRpc("SendSetPikminSeedRpcAsync", req)) {
                 gSeedSent[d[@"id"]] = @(now);
                 PALOG(@"[모종] 심기 id=%@ req=%@ slot=%@", d[@"id"], d[@"req"], freeSlots[set]);
                 set++;
