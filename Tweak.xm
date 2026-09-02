@@ -1277,6 +1277,20 @@ static void *pkNewPoint(double lat, double lng) {
     return p;
 }
 
+// ---------- why these calls are fire-and-forget ----------
+//
+// It is tempting to read the Task each RpcManager method returns and log what
+// the server actually said. Two attempts wedged the whole app about a second
+// after the first tracked call — once with a pinned GC handle, once with a
+// plain one and purely field-based reads — so the game does not survive us
+// holding on to its Tasks from an NSTimer tick. Nothing in the log, no crash
+// report, and uiopen would not bring it back.
+//
+// Results are therefore judged from state the game itself keeps and we already
+// read every pass: a claimed flower has visitRewardReceived_ set on its map
+// object, a planted seedling has plantedTimeMs_, a started expedition leaves
+// ExpeditionState.Available. That is slower to observe but cannot hang.
+
 // ---------- map objects (big flowers etc.) ----------
 #define PK_MO_POIFLOWER   13      // MapObjectProto.ObjectOneofCase
 #define PK_MO_FLOWERFIELD 14
@@ -1416,7 +1430,11 @@ static NSString *bigFlowerPass(void) {
         if (!req) return @"큰꽃 요청 생성 실패";
         *(void**)((char*)req + 0x18) = [o[@"idp"] pointerValue];   // mapObjectId_
         *(unsigned char*)((char*)req + 0x20) = 1;                   // includeFailedReason_
-        if (pkSendRpc("SendClaimPoiFlowerVisitRewardRpcForResultAsync", req)) {
+        // Plain variant — the one a successful claim was first observed with.
+        // Fire and forget: the answer is read off the map object instead (the
+        // server sets visitRewardReceived_), because touching the returned Task
+        // at all wedged the app twice. See the note above pkSendRpc.
+        if (pkSendRpc("SendClaimPoiFlowerVisitRewardRpcAsync", req)) {
             sent++;
             gPoiTried[mid] = @(now);
             PALOG(@"[큰꽃] 정수 채집 요청 id=%@ state=%d color=%@ dist=%.0fm", mid, st, o[@"color"], d);
@@ -1608,7 +1626,7 @@ static NSString *seedPass(void) {
             lastTry = now; plantedAtTry = nPlanted;
             if (pkSendRpc("SendSetPikminSeedRpcAsync", req)) {
                 gSeedSent[d[@"id"]] = @(now);
-                PALOG(@"[모종] 심기 id=%@ req=%@ slot=%@", d[@"id"], d[@"req"], freeSlots[set]);
+                PALOG(@"[모종] 심기 id=%@ req=%@ point=(%.6f,%.6f)", d[@"id"], d[@"req"], blat, blng);
                 set++;
             }
             break;   // one planting per pass — the slot list refreshes after the server answers
