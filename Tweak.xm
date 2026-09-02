@@ -1350,6 +1350,15 @@ static void mapDumpPass(void) {
     NSString *path = [[NSHomeDirectory() stringByAppendingPathComponent:@"Documents"]
                       stringByAppendingPathComponent:@"mapobjects.json"];
     [json writeToFile:path atomically:YES];
+    // A copy where GPS Wander looks first. The sandbox may refuse; say so once.
+    static int sharedState = -1;
+    NSError *e = nil;
+    BOOL ok = [json writeToFile:@"/var/jb/var/mobile/Library/GPSWander/mapobjects.json"
+                        options:NSDataWritingAtomic error:&e];
+    if ((int)ok != sharedState) {
+        sharedState = ok;
+        PALOG(@"[map] shared copy %@%@", ok ? @"written" : @"refused", ok ? @"" : [NSString stringWithFormat:@" — %@", e.localizedDescription]);
+    }
 }
 
 // ---------- feature: 큰꽃 정수 (claim the visit reward of bloomed big flowers) ----------
