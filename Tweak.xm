@@ -60,6 +60,8 @@ typedef void         (*t_MSHookFunction)(void*, void*, void**);
 typedef uint32_t     (*t_gchandle_new)(void*, int);
 typedef void*        (*t_gchandle_get_target)(uint32_t);
 typedef void         (*t_gchandle_free)(uint32_t);
+typedef void*        (*t_class_get_nested_types)(void*, void**);
+typedef const char*  (*t_class_get_name)(void*);
 
 static t_domain_get                 f_domain_get;
 static t_thread_attach              f_thread_attach;
@@ -78,6 +80,8 @@ static t_MSHookFunction             f_MSHookFunction;
 static t_gchandle_new               f_gchandle_new;
 static t_gchandle_get_target        f_gchandle_get_target;
 static t_gchandle_free              f_gchandle_free;
+static t_class_get_nested_types     f_class_get_nested_types;
+static t_class_get_name             f_class_get_name;
 
 static void *gUnity = NULL;
 #define SYM(v, name) v = (typeof(v))dlsym(gUnity ? gUnity : RTLD_DEFAULT, name)
@@ -110,6 +114,8 @@ static BOOL resolveAPI(void) {
     SYM(f_gchandle_new, "il2cpp_gchandle_new");
     SYM(f_gchandle_get_target, "il2cpp_gchandle_get_target");
     SYM(f_gchandle_free, "il2cpp_gchandle_free");
+    SYM(f_class_get_nested_types, "il2cpp_class_get_nested_types");
+    SYM(f_class_get_name, "il2cpp_class_get_name");
     done = f_domain_get && f_domain_get_assemblies && f_assembly_get_image &&
            f_image_get_name && f_class_from_name && f_class_get_method_from_name &&
            f_class_get_field_from_name && f_field_get_offset && f_object_new &&
@@ -316,6 +322,27 @@ static bool hook_pitin(void *self, void *pid, void *mi) {
     return orig_pitin(self, pid, mi);
 }
 
+// Capture FlowerPlantingController — the game's own planting session owner.
+// StartPlantingWithConfirmationAsync(petalId, confirmation:false) starts a
+// session exactly as the 심기 button does; from then on the game itself sends
+// PlantFlower2 as the (spoofed) location moves and stops when petals run out.
+// isStarted @0x118 tells whether a session is live.
+static void *gPlant = NULL;                       // FlowerPlantingController
+static void (*orig_plantinit)(void*, void*);
+static void hook_plantinit(void *self, void *mi) {
+    if (self && gPlant != self) { gPlant = self; PALOG(@"[capture] FlowerPlantingController=%p (Init)", self); }
+    orig_plantinit(self, mi);
+}
+// Capture MapObjectManager — holds every map object the server streamed for the
+// current viewport (big flowers, flower fields, mushrooms) in
+// mapObjects Dictionary<string, MapObject> @0x70; MapObject.Proto @0x20.
+static void *gMapObj = NULL;                      // MapObjectManager
+static void (*orig_mapupd)(void*, void*);
+static void hook_mapupd(void *self, void *mi) {
+    if (self && gMapObj != self) { gMapObj = self; PALOG(@"[capture] MapObjectManager=%p (Update)", self); }
+    orig_mapupd(self, mi);
+}
+
 static void pkInstallHooks(void) {
     static BOOL installed = NO;
     if (installed || !resolveAPI()) return;
@@ -366,6 +393,14 @@ static void pkInstallHooks(void) {
     void *mEU = edsCls ? f_class_get_method_from_name(edsCls, "NotifyUpdate", 1) : NULL;
     if (mEA) { void *fp = *(void**)mEA; if (fp) f_MSHookFunction(fp, (void*)hook_expadd, (void**)&orig_expadd); }
     if (mEU) { void *fp = *(void**)mEU; if (fp) f_MSHookFunction(fp, (void*)hook_expupd, (void**)&orig_expupd); }
+    // Planting controller + map object manager (자동성장).
+    void *fpcCls = pkFindClass("Niantic.Ichigo.Game.Flowers", "FlowerPlantingController");
+    void *mPI = fpcCls ? f_class_get_method_from_name(fpcCls, "Init", 0) : NULL;
+    if (mPI) { void *fp = *(void**)mPI; if (fp) f_MSHookFunction(fp, (void*)hook_plantinit, (void**)&orig_plantinit); }
+    void *momCls = pkFindClass("Niantic.Ichigo.Game.MapObjects", "MapObjectManager");
+    void *mMU = momCls ? f_class_get_method_from_name(momCls, "Update", 0) : NULL;
+    if (mMU) { void *fp = *(void**)mMU; if (fp) f_MSHookFunction(fp, (void*)hook_mapupd, (void**)&orig_mapupd); }
+    PALOG(@"[hooks] fpcCls=%p mPI=%p momCls=%p mMU=%p", fpcCls, mPI, momCls, mMU);
     PALOG(@"[hooks] edsCls=%p mEA=%p mEU=%p", edsCls, mEA, mEU);
     PALOG(@"[hooks] mFS=%p mFS2=%p mPS=%p mPS2=%p mSchF=%p mSchP=%p", mFS, mFS2, mPS, mPS2, mSchF, mSchP);
     installed = (mGP || mAU || mGK) != 0;
@@ -703,35 +738,51 @@ static NSString *harvestPass(void) {
     return ok ? [NSString stringWithFormat:@"🌸 수확(RPC) %lu마리 — gAction 미포착", (unsigned long)ids.count] : @"🌸 수확 전송 실패";
 }
 
-// ---------- feature: collect expedition rewards (complete ready tasks) ----------
+// ---------- feature: collect expedition rewards (complete returned tasks) ----------
+// Decided by the game's own state machine: ExpeditionDataStore holds an
+// ExpeditionItemData per task and its State (Available 0, Outgoing 1, AtSpawn 2,
+// Incoming 3, Returned 4) is what the panel's 회수 button reads. Only Returned
+// tasks get CompletePikminTask. The earlier version fired it at every task in
+// the inventory once a second, ready or not — a pointless request storm.
+static void *pkItemProto(void *item);
+static NSArray *pkExpeditions(void);
+static int pkIntProp(void *obj, const char *name);
+#define PK_EXP_RETURNED 4
+static NSMutableDictionary<NSString *, NSNumber *> *gCollectSent = nil;
 static NSString *collectPass(void) {
     void *inv = gInv();
     if (!inv || !gRpc) return @"인벤토리/서버 준비 대기";
-    void *invCls = f_object_get_class(inv);
-    void *mList = pkMethod(invCls, "GetPikminTaskList", 0);
-    void *list = pkInvoke(mList, inv, NULL);
-    if (!list) return @"태스크 목록 없음";
-    int size = *(int*)((char*)list + 0x18);            // List<T>._size
-    void *arr = *(void**)((char*)list + 0x10);         // List<T>._items
-    if (!arr || size <= 0 || size > 100000) return @"완료할 원정 없음";
-    char *adata = (char*)arr + 0x20;
-    int sent = 0;
+    if (!gExpStore) return @"탐험 스토어 대기 (지도가 뜨면 잡힘)";
+    if (!gCollectSent) gCollectSent = [NSMutableDictionary dictionary];
+    NSArray *exps = pkExpeditions();
+    if (!exps.count) return @"탐험 없음";
+    int sent = 0, byState[8] = {0};
+    NSTimeInterval now = [NSDate date].timeIntervalSince1970;
     void *tCls = pkFindClass("Ichigo.Proto", "CompletePikminTaskRequestProto");
-    for (int i = 0; i < size; i++) {
-        void *item = *(void**)(adata + (size_t)i * 8);
-        if (!item) continue;
-        void *itCls = f_object_get_class(item);
-        void *mId = pkMethod(itCls, "get_Id", 0);
-        void *idStr = pkInvoke(mId, item, NULL);
+    for (NSValue *ev in exps) {
+        void *d = [ev pointerValue];
+        int st = pkIntProp(d, "get_State");
+        if (st >= 0 && st < 8) byState[st]++;
+        if (st != PK_EXP_RETURNED) continue;
+        void *item = *(void**)((char*)d + 0x78);              // PikminTaskInventoryItem
+        void *idStr = item ? pkInvoke(pkMethod(f_object_get_class(item), "get_Id", 0), item, NULL) : NULL;
         if (!idStr) continue;
+        NSString *tid = pkStr(idStr) ?: @"";
+        NSNumber *when = gCollectSent[tid];
+        if (when && now - when.doubleValue < 60.0) continue;    // answer pending
         void *req = tCls ? f_object_new(tCls) : NULL;
         if (!req) continue;
         void *ctor = pkMethod(tCls, ".ctor", 0);
         if (ctor) pkInvoke(ctor, req, NULL);
         *(void**)((char*)req + 0x18) = idStr;          // pikminTaskId_
-        if (pkSendRpc("SendCompletePikminTaskRpcForResultAsync", req)) sent++;
+        if (pkSendRpc("SendCompletePikminTaskRpcForResultAsync", req)) {
+            sent++; gCollectSent[tid] = @(now);
+            PALOG(@"[collect] 회수 task=%@", tid);
+        }
+        if (sent >= 5) break;
     }
-    return sent ? [NSString stringWithFormat:@"📦 원정 완료 요청 %d건", sent] : @"완료할 원정 없음";
+    return [NSString stringWithFormat:@"📦 회수 요청 %d건 (대기 %d, 출발 %d, 현장 %d, 귀환중 %d, 귀환 %d)",
+            sent, byState[0], byState[1], byState[2], byState[3], byState[4]];
 }
 
 // ---------- feature: auto-expedition (탐험) ----------
@@ -1067,28 +1118,418 @@ static NSString *feedPass(void) {
     PALOG(@"[feed] step1 squad read");
     // Only deployed (squad) Pikmin can be fed — waiting ones are rejected server-side.
     NSArray *squad = pkSquad();
-    // Feed the whole squad one nectar each. A Pikmin whose flower is already at its
-    // max petals is rejected server-side (no nectar spent), and harvest keeps the
-    // others below max, so this spends nectar only where there is actually room —
-    // without needing the per-friendship capacity table. (flowerState stays FLOWER
-    // even after a harvest, so it can't be used to tell "has room".)
+    // A Pikmin whose flower is already at its max petals is rejected server-side
+    // (no nectar spent), and harvest keeps the others below max, so this spends
+    // nectar only where there is actually room — without needing the
+    // per-friendship capacity table. (flowerState stays FLOWER even after a
+    // harvest, so it can't be used to tell "has room".)
+    //
+    // Pipeline pacing: the squad is fed in rotation, a handful per pass, one
+    // Pikmin per FeedPikmins RPC (the shape the game's manual feed uses — a
+    // 24-in-one RPC never consumed nectar). Feeding the whole squad every
+    // second was dozens of RPCs a second; this is a few every kFeedPace.
     NSMutableArray *ids = [NSMutableArray array];
     for (NSDictionary *d in squad) [ids addObject:d[@"id"]];   // whole squad
     void *nid = [best[@"id"] pointerValue];
     if (!ids.count) return @"🍯 대열에 피크민 없음 (배치/출격 필요)";
-    // Send ONE Pikmin per FeedPikmins RPC, exactly like the game's manual feed
-    // (which sent 1–5 per call). A 24-in-one RPC never consumed nectar; a single
-    // Pikmin per RPC matches the shape that works. Cap the count per tick so we
-    // don't fire a burst. plain variant, numItems=1.
-    const int kMaxPerTick = 40;   // feed the whole squad each tick
+    static NSUInteger cursor = 0;
+    const int kMaxPerPass = 8;
     int sent = 0;
-    for (NSValue *v in ids) {
-        if (sent >= kMaxPerTick) break;
+    for (int k = 0; k < kMaxPerPass && k < (int)ids.count; k++) {
+        NSValue *v = ids[(cursor + k) % ids.count];
         if (pkFeedBatch(@[ v ], nid, 1)) sent++;
     }
-    PALOG(@"[feed] step3 per-pikmin RPCs sent=%d itemId='%@'", sent, pkStr(nid) ?: @"");
+    cursor = (cursor + kMaxPerPass) % ids.count;
+    PALOG(@"[feed] per-pikmin RPCs sent=%d itemId='%@' (squad %lu, cursor %lu)", sent, pkStr(nid) ?: @"",
+          (unsigned long)ids.count, (unsigned long)cursor);
     return [NSString stringWithFormat:@"🍯 대열급여 %d마리(1개씩) type%@ / 정수총 %lld",
             sent, best[@"type"], total];
+}
+
+// ================= 자동성장 (auto-grow) pipeline =================
+//
+// The nectar loop from the field guide, automated end to end:
+//   walk (GPS Wander)  →  plant flowers with the petal colour we are shortest
+//   of  →  claim nectar from every bloomed big flower we pass  →  fruit
+//   expeditions spawn around fresh blooms and the 탐험 pass sends them  →
+//   수집 completes them (fruit → nectar)  →  정수 feeds the squad  →  수확
+//   picks the petals  →  seedlings ride the step count in the planter and are
+//   plucked the moment they are ripe.
+//
+// Everything below is decided from the game's own state and sent through the
+// game's own RPC wrappers; nothing is forged.
+
+// ---------- current (spoofed) location ----------
+static CLLocationManager *gLoc = nil;
+static CLLocation *gLastLoc = nil;                // whatever CoreLocation (or GPS Wander) hands us
+static double pkDistM(double lat1, double lng1, double lat2, double lng2) {
+    double r = 6371000.0, p = M_PI / 180.0;
+    double dlat = (lat2 - lat1) * p, dlng = (lng2 - lng1) * p;
+    double a = sin(dlat / 2) * sin(dlat / 2) + cos(lat1 * p) * cos(lat2 * p) * sin(dlng / 2) * sin(dlng / 2);
+    return 2 * r * atan2(sqrt(a), sqrt(1 - a));
+}
+
+// ---------- small il2cpp collection helpers ----------
+// List<T> of reference T: _items @0x10, _size @0x18, array data @+0x20.
+static void pkEachList(void *list, void (^fn)(void *item)) {
+    if (!list) return;
+    int size = *(int*)((char*)list + 0x18);
+    void *arr = *(void**)((char*)list + 0x10);
+    if (!arr || size <= 0 || size > 100000) return;
+    char *data = (char*)arr + 0x20;
+    for (int i = 0; i < size; i++) { void *it = *(void**)(data + (size_t)i * 8); if (it) fn(it); }
+}
+// RepeatedField<T> of reference T: fields `array` / `count` (resolved by name).
+static void pkEachRepeated(void *rf, void (^fn)(void *item)) {
+    if (!rf) return;
+    void *cls = f_object_get_class(rf);
+    void *fa = f_class_get_field_from_name(cls, "array");
+    void *fc = f_class_get_field_from_name(cls, "count");
+    if (!fa || !fc) return;
+    void *arr = *(void**)((char*)rf + f_field_get_offset(fa));
+    int n = *(int*)((char*)rf + f_field_get_offset(fc));
+    if (!arr || n <= 0 || n > 100000) return;
+    char *data = (char*)arr + 0x20;
+    for (int i = 0; i < n; i++) { void *it = *(void**)(data + (size_t)i * 8); if (it) fn(it); }
+}
+static void *pkInvList(const char *getter) {          // InventoryManager.Get*List()
+    void *inv = gInv();
+    return inv ? pkInvoke(pkMethod(f_object_get_class(inv), getter, 0), inv, NULL) : NULL;
+}
+static void *pkItemProto(void *item) { return item ? pkInvoke(pkMethod(f_object_get_class(item), "get_Proto", 0), item, NULL) : NULL; }
+static void *pkItemId(void *item)    { return item ? pkInvoke(pkMethod(f_object_get_class(item), "get_Id", 0), item, NULL) : NULL; }
+// A nested class (Outer.Types.Inner) cannot be found by dotted name; walk the
+// outer class's nested types instead.
+static void *pkNestedClass(void *outer, const char *name) {
+    if (!outer || !f_class_get_nested_types || !f_class_get_name) return NULL;
+    void *iter = NULL, *k;
+    while ((k = f_class_get_nested_types(outer, &iter))) {
+        if (!strcmp(f_class_get_name(k), name)) return k;
+        // Types live one level deeper (Outer.Types.Inner).
+        if (!strcmp(f_class_get_name(k), "Types")) {
+            void *it2 = NULL, *k2;
+            while ((k2 = f_class_get_nested_types(k, &it2)))
+                if (!strcmp(f_class_get_name(k2), name)) return k2;
+        }
+    }
+    return NULL;
+}
+static void *pkNewObj(void *cls) {
+    if (!cls) return NULL;
+    void *o = f_object_new(cls);
+    if (!o) return NULL;
+    void *ctor = pkMethod(cls, ".ctor", 0);
+    if (ctor) pkInvoke(ctor, o, NULL);
+    return o;
+}
+// Ichigo.Proto.PointProto{latDegrees_ @0x18, lngDegrees_ @0x20}
+static void *pkNewPoint(double lat, double lng) {
+    void *p = pkNewReq("PointProto", NULL);
+    if (!p) return NULL;
+    *(double*)((char*)p + 0x18) = lat;
+    *(double*)((char*)p + 0x20) = lng;
+    return p;
+}
+
+// ---------- map objects (big flowers etc.) ----------
+#define PK_MO_POIFLOWER   13      // MapObjectProto.ObjectOneofCase
+#define PK_MO_FLOWERFIELD 14
+#define PK_MO_OVERLAY     21
+#define PK_MO_MUSHROOM    22
+#define PK_MO_CAMPAIGN    23
+#define PK_FS_LEAF        1       // PoiFlowerOverlayProto.Types.State
+#define PK_FS_BUD         2
+#define PK_FS_FLOWER      3
+#define PK_FS_FULL_BLOOM  4
+#define PK_FS_PRE_FLOWER  5
+
+// Every object the manager holds:
+//   @{ id, idp(NSValue Il2CppString), kind, lat, lng, state, color, bloom(ms), visited }
+// MapObjectProto: id_ @0x18, point_ @0x20, object_ @0x30, objectCase_ @0x38.
+// PoiFlowerProto: state_ @0x18, appearance_ @0x20 (FlowerProto.color_ @0x18),
+//   bloomedTimeMs_ @0x40, visitRewardReceived_ @0x48.
+// PoiFlowerOverlayProto: state_ @0x18, flower_ @0x20 (FlowerPetalProto.flowerType_ @0x18),
+//   lastBloomingMs_ @0x28.
+static NSArray *pkMapObjects(void) {
+    if (!gMapObj || !resolveAPI()) return nil;
+    void *dict = *(void**)((char*)gMapObj + 0x70);
+    if (!dict) return nil;
+    void *dcls = f_object_get_class(dict);
+    void *fE = dcls ? f_class_get_field_from_name(dcls, "_entries") : NULL;
+    if (!fE && dcls) fE = f_class_get_field_from_name(dcls, "entries");
+    void *fC = dcls ? f_class_get_field_from_name(dcls, "_count") : NULL;
+    if (!fC && dcls) fC = f_class_get_field_from_name(dcls, "count");
+    if (!fE || !fC) return nil;
+    void *entries = *(void**)((char*)dict + f_field_get_offset(fE));
+    int count = *(int*)((char*)dict + f_field_get_offset(fC));
+    if (!entries || count <= 0 || count > 100000) return nil;
+    char *data = (char*)entries + 0x20;
+    NSMutableArray *out = [NSMutableArray array];
+    for (int i = 0; i < count; i++) {
+        void *v = *(void**)(data + (size_t)i * 0x18 + 0x10);
+        if (!v) continue;
+        // MapObjectManager.MapObject: Proto @0x10 is a Predicted<MapObjectProto>
+        // (confirmedValue @0x10, predictedValue @0x18) — take the predicted one,
+        // which is what the map shows, falling back to the confirmed one.
+        void *pred = *(void**)((char*)v + 0x10);
+        if (!pred) continue;
+        void *proto = *(void**)((char*)pred + 0x18);
+        if (!proto) proto = *(void**)((char*)pred + 0x10);
+        if (!proto) continue;
+        void *idStr = *(void**)((char*)proto + 0x18);
+        void *pt    = *(void**)((char*)proto + 0x20);
+        void *obj   = *(void**)((char*)proto + 0x30);
+        int kase    = *(int*)((char*)proto + 0x38);
+        if (!idStr || !pt) continue;
+        double lat = *(double*)((char*)pt + 0x18), lng = *(double*)((char*)pt + 0x20);
+        int state = 0, color = 0; long long bloom = 0; BOOL visited = NO;
+        if (kase == PK_MO_POIFLOWER && obj) {
+            state = *(int*)((char*)obj + 0x18);
+            void *ap = *(void**)((char*)obj + 0x20);
+            color = ap ? *(int*)((char*)ap + 0x18) : 0;
+            bloom = *(long long*)((char*)obj + 0x40);
+            visited = *(unsigned char*)((char*)obj + 0x48) != 0;
+        } else if (kase == PK_MO_OVERLAY && obj) {
+            state = *(int*)((char*)obj + 0x18);
+            void *fp = *(void**)((char*)obj + 0x20);
+            color = fp ? *(int*)((char*)fp + 0x18) : 0;
+            bloom = *(long long*)((char*)obj + 0x28);
+        }
+        NSString *ids = pkStr(idStr) ?: @"";
+        [out addObject:@{ @"id": ids, @"idp": [NSValue valueWithPointer:idStr], @"kind": @(kase),
+                          @"lat": @(lat), @"lng": @(lng), @"state": @(state), @"color": @(color),
+                          @"bloom": @(bloom), @"visited": @(visited) }];
+    }
+    return out;
+}
+
+// Dump the current map objects + our position to Documents/mapobjects.json so
+// GPS Wander can draw them and route the walk through the big flowers.
+static void mapDumpPass(void) {
+    NSArray *objs = pkMapObjects();
+    if (!objs) return;
+    NSMutableArray *rows = [NSMutableArray array];
+    for (NSDictionary *o in objs) {
+        [rows addObject:@{ @"id": o[@"id"], @"kind": o[@"kind"], @"lat": o[@"lat"], @"lng": o[@"lng"],
+                           @"state": o[@"state"], @"color": o[@"color"], @"bloom": o[@"bloom"],
+                           @"visited": o[@"visited"] }];
+    }
+    NSDictionary *doc = @{ @"t": @([NSDate date].timeIntervalSince1970),
+                           @"lat": @(gLastLoc ? gLastLoc.coordinate.latitude : 0),
+                           @"lng": @(gLastLoc ? gLastLoc.coordinate.longitude : 0),
+                           @"objs": rows };
+    NSData *json = [NSJSONSerialization dataWithJSONObject:doc options:0 error:nil];
+    if (!json) return;
+    NSString *path = [[NSHomeDirectory() stringByAppendingPathComponent:@"Documents"]
+                      stringByAppendingPathComponent:@"mapobjects.json"];
+    [json writeToFile:path atomically:YES];
+}
+
+// ---------- feature: 큰꽃 정수 (claim the visit reward of bloomed big flowers) ----------
+// PoiFlowerVisitRewardClaimer.CanTryClaim = IsBlooming && !VisitRewardReceived &&
+// IsWithinRange && HasCapacity. We check the first three from the map object and
+// our own position; the server answers with FailedReason for the rest.
+static NSMutableDictionary<NSString *, NSNumber *> *gPoiTried = nil;
+static const double kPoiRangeM = 40.0;           // interaction range we assume (server enforces its own)
+static const NSTimeInterval kPoiRetry = 180.0;    // seconds before re-asking for the same flower
+static NSString *bigFlowerPass(void) {
+    if (!gMapObj) return @"맵 오브젝트 대기";
+    if (!gRpc) return @"서버 준비 대기";
+    if (!gLastLoc) return @"위치 대기";
+    if (!gPoiTried) gPoiTried = [NSMutableDictionary dictionary];
+    NSArray *objs = pkMapObjects();
+    int nFlower = 0, nBloom = 0, nNear = 0, sent = 0;
+    double mlat = gLastLoc.coordinate.latitude, mlng = gLastLoc.coordinate.longitude;
+    NSTimeInterval now = [NSDate date].timeIntervalSince1970;
+    for (NSDictionary *o in objs) {
+        if ([o[@"kind"] intValue] != PK_MO_POIFLOWER) continue;
+        nFlower++;
+        int st = [o[@"state"] intValue];
+        if (st != PK_FS_FLOWER && st != PK_FS_FULL_BLOOM) continue;
+        nBloom++;
+        if ([o[@"visited"] boolValue]) continue;
+        double d = pkDistM(mlat, mlng, [o[@"lat"] doubleValue], [o[@"lng"] doubleValue]);
+        if (d > kPoiRangeM) continue;
+        nNear++;
+        NSString *mid = o[@"id"];
+        NSNumber *when = gPoiTried[mid];
+        if (when && now - when.doubleValue < kPoiRetry) continue;
+        void *req = pkNewReq("ClaimPoiFlowerVisitRewardRequestProto", NULL);
+        if (!req) return @"큰꽃 요청 생성 실패";
+        *(void**)((char*)req + 0x18) = [o[@"idp"] pointerValue];   // mapObjectId_
+        *(unsigned char*)((char*)req + 0x20) = 1;                   // includeFailedReason_
+        if (pkSendRpc("SendClaimPoiFlowerVisitRewardRpcForResultAsync", req)) {
+            sent++;
+            gPoiTried[mid] = @(now);
+            PALOG(@"[큰꽃] 정수 채집 요청 id=%@ state=%d color=%@ dist=%.0fm", mid, st, o[@"color"], d);
+        }
+        if (sent >= 2) break;
+    }
+    return [NSString stringWithFormat:@"🌼 큰꽃 %d / 만개 %d / 사정권 %d / 요청 %d", nFlower, nBloom, nNear, sent];
+}
+
+// ---------- feature: 꽃 심기 (keep a planting session running) ----------
+// Petal choice: plain petals only (special kinds are kept for decor), colour =
+// whichever of white/red/blue/yellow we hold the least nectar of, among the
+// colours we have petals for. FlowerProto.Types.Type FLOWER_0..3 (1..4) line up
+// with HoneyType WHITE/RED/BLUE/YELLOW (1..4).
+static long long gNectarPred[8];                   // filled by pkNectarCensus()
+static void pkNectarCensus(void) {
+    memset(gNectarPred, 0, sizeof(gNectarPred));
+    void *inv = gInv();
+    if (!inv) return;
+    void *storage = *(void**)((char*)inv + 0x48);
+    void *items = storage ? *(void**)((char*)storage + 0x10) : NULL;
+    pkEachList(items, ^(void *pred) {
+        void *conf = *(void**)((char*)pred + 0x10);
+        void *prd  = *(void**)((char*)pred + 0x18);
+        void *item = prd ? prd : conf;
+        void *proto = pkItemProto(item);
+        if (!proto) return;
+        int n = *(int*)((char*)proto + 0x18), type = *(int*)((char*)proto + 0x1C);
+        NSString *fkind = pkStr(*(void**)((char*)proto + 0x28));
+        if (type >= 0 && type < 8 && n > 0 && fkind.length == 0) gNectarPred[type] += n;
+    });
+}
+// @[ @{ idp, color, kind, num, special } ] — FlowerPetalProto: flowerType_ @0x18,
+// kind_ @0x1C, numPetal_ @0x20, flowerKind_ @0x28.
+static NSArray *pkPetals(void) {
+    NSMutableArray *out = [NSMutableArray array];
+    pkEachList(pkInvList("GetFlowerPetalList"), ^(void *item) {
+        void *proto = pkItemProto(item);
+        void *idp = pkItemId(item);
+        if (!proto || !idp) return;
+        int color = *(int*)((char*)proto + 0x18), kind = *(int*)((char*)proto + 0x1C);
+        int num = *(int*)((char*)proto + 0x20);
+        NSString *fk = pkStr(*(void**)((char*)proto + 0x28));
+        BOOL special = (kind != 0) || (fk.length > 0);
+        if (num <= 0) return;
+        [out addObject:@{ @"idp": [NSValue valueWithPointer:idp], @"id": pkStr(idp) ?: @"",
+                          @"color": @(color), @"kind": @(kind), @"num": @(num), @"special": @(special) }];
+    });
+    return out;
+}
+static NSString *plantPass(void) {
+    if (!gPlant) return @"심기 컨트롤러 대기 (지도 화면이 뜨면 잡힘)";
+    if (!gRpc || !gInv()) return @"서버 준비 대기";
+    BOOL started = *(unsigned char*)((char*)gPlant + 0x118) != 0;    // isStarted
+    NSArray *petals = pkPetals();
+    long long plain = 0, special = 0;
+    for (NSDictionary *p in petals) { if ([p[@"special"] boolValue]) special += [p[@"num"] intValue]; else plain += [p[@"num"] intValue]; }
+    if (started) return [NSString stringWithFormat:@"🌱 심는 중 (일반 꽃잎 %lld, 특수 %lld)", plain, special];
+    if (plain <= 0) return [NSString stringWithFormat:@"🌱 일반 꽃잎 없음 (특수 %lld 보존)", special];
+    pkNectarCensus();
+    NSDictionary *best = nil; long long bestNectar = 0;
+    for (NSDictionary *p in petals) {
+        if ([p[@"special"] boolValue]) continue;
+        int c = [p[@"color"] intValue];
+        long long nec = (c >= 1 && c <= 4) ? gNectarPred[c] : 0x7fffffff;
+        if (!best || nec < bestNectar || (nec == bestNectar && [p[@"num"] intValue] > [best[@"num"] intValue])) { best = p; bestNectar = nec; }
+    }
+    if (!best) return @"🌱 쓸 꽃잎 없음";
+    void *m = pkMethod(f_object_get_class(gPlant), "StartPlantingWithConfirmationAsync", 2);
+    if (!m) return @"StartPlantingWithConfirmationAsync 없음";
+    unsigned char confirm = 0;
+    void *a[2] = { [best[@"idp"] pointerValue], &confirm };
+    void *r = pkInvoke(m, gPlant, a);
+    PALOG(@"[심기] 시작 petal=%@ color=%@ num=%@ (정수 W%lld R%lld B%lld Y%lld) task=%p",
+          best[@"id"], best[@"color"], best[@"num"], gNectarPred[1], gNectarPred[2], gNectarPred[3], gNectarPred[4], r);
+    return [NSString stringWithFormat:@"🌱 심기 시작 — 색 %@ 꽃잎 %@장", best[@"color"], best[@"num"]];
+}
+
+// ---------- feature: 모종 (plant seedlings into free planter slots, pluck ripe ones) ----------
+// PikminSeedProto: requiredSteps_ @0x50, currentSteps_ @0x54, currentBonusSteps_ @0x58,
+//   plantedTimeMs_ @0x60, starred_ @0x70.
+// PlanterProto: slot_ @0x20 RepeatedField<SlotProto>; SlotProto: pikminSeedId_ @0x18,
+//   remainingUse_ @0x20, index_ @0x24, slotType_ @0x28 (1 = disposable).
+// SetPikminSeedRequestProto: seedId_ @0x18, point_ @0x20, slotOption_ @0x28 {slotIndex_ @0x18}.
+// PullPikminRequestProto: seedId_ RepeatedField<string> (get_SeedId).
+static NSMutableDictionary<NSString *, NSNumber *> *gSeedSent = nil;
+static const NSTimeInterval kSeedRetry = 120.0;
+static NSString *seedPass(void) {
+    if (!gRpc || !gInv()) return @"서버 준비 대기";
+    if (!gSeedSent) gSeedSent = [NSMutableDictionary dictionary];
+    NSTimeInterval now = [NSDate date].timeIntervalSince1970;
+    NSMutableArray *ripe = [NSMutableArray array], *waiting = [NSMutableArray array];
+    __block int nPlanted = 0, nSeeds = 0;
+    pkEachList(pkInvList("GetPikminSeedList"), ^(void *item) {
+        void *proto = pkItemProto(item);
+        void *idp = pkItemId(item);
+        if (!proto || !idp) return;
+        nSeeds++;
+        int req = *(int*)((char*)proto + 0x50), cur = *(int*)((char*)proto + 0x54);
+        float bonus = *(float*)((char*)proto + 0x58);
+        long long planted = *(long long*)((char*)proto + 0x60);
+        NSDictionary *d = @{ @"idp": [NSValue valueWithPointer:idp], @"id": pkStr(idp) ?: @"",
+                             @"req": @(req), @"cur": @(cur), @"bonus": @(bonus) };
+        if (planted > 0) { nPlanted++; if (req > 0 && cur + (int)bonus >= req) [ripe addObject:d]; }
+        else [waiting addObject:d];
+    });
+    int pulled = 0, set = 0;
+    // 1) Pluck ripe seedlings — one PullPikmin RPC, up to 5 ids.
+    if (ripe.count) {
+        void *cls = NULL;
+        void *req = pkNewReq("PullPikminRequestProto", &cls);
+        void *rf = req ? pkInvoke(pkMethod(cls, "get_SeedId", 0), req, NULL) : NULL;
+        void *mAdd = rf ? pkMethod(f_object_get_class(rf), "Add", 1) : NULL;
+        if (mAdd) {
+            for (NSDictionary *d in ripe) {
+                NSNumber *when = gSeedSent[d[@"id"]];
+                if (when && now - when.doubleValue < kSeedRetry) continue;
+                void *a[1] = { [d[@"idp"] pointerValue] };
+                pkInvoke(mAdd, rf, a);
+                gSeedSent[d[@"id"]] = @(now);
+                PALOG(@"[모종] 뽑기 id=%@ steps %@/%@", d[@"id"], d[@"cur"], d[@"req"]);
+                if (++pulled >= 5) break;
+            }
+            if (pulled) pkSendRpc("SendPullPikminRpcForResultAsync", req);
+        }
+    }
+    // 2) Fill free planter slots with the seedlings that ripen soonest.
+    NSMutableArray *freeSlots = [NSMutableArray array];
+    __block int nSlots = 0;
+    pkEachList(pkInvList("GetPlanterList"), ^(void *planter) {
+        void *proto = pkItemProto(planter);
+        if (!proto) return;
+        pkEachRepeated(*(void**)((char*)proto + 0x20), ^(void *slot) {
+            nSlots++;
+            NSString *sid = pkStr(*(void**)((char*)slot + 0x18));
+            int remaining = *(int*)((char*)slot + 0x20), idx = *(int*)((char*)slot + 0x24), type = *(int*)((char*)slot + 0x28);
+            if (sid.length) return;                              // occupied
+            if (type == 1 && remaining <= 0) return;             // used-up disposable slot
+            [freeSlots addObject:@(idx)];
+        });
+    });
+    if (freeSlots.count && waiting.count && gLastLoc) {
+        [waiting sortUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) {
+            return [a[@"req"] compare:b[@"req"]];
+        }];
+        for (NSDictionary *d in waiting) {
+            if (set >= (int)freeSlots.count) break;
+            NSNumber *when = gSeedSent[d[@"id"]];
+            if (when && now - when.doubleValue < kSeedRetry) continue;
+            void *cls = NULL;
+            void *req = pkNewReq("SetPikminSeedRequestProto", &cls);
+            if (!req) break;
+            *(void**)((char*)req + 0x18) = [d[@"idp"] pointerValue];                 // seedId_
+            *(void**)((char*)req + 0x20) = pkNewPoint(gLastLoc.coordinate.latitude,
+                                                      gLastLoc.coordinate.longitude);   // point_
+            void *soCls = pkNestedClass(cls, "SlotOptionProto");
+            void *so = pkNewObj(soCls);
+            if (!so) { PALOG(@"[모종] SlotOptionProto 클래스 못 찾음"); break; }
+            *(int*)((char*)so + 0x18) = [freeSlots[set] intValue];                    // slotIndex_
+            *(void**)((char*)req + 0x28) = so;                                         // slotOption_
+            if (pkSendRpc("SendSetPikminSeedRpcForResultAsync", req)) {
+                gSeedSent[d[@"id"]] = @(now);
+                PALOG(@"[모종] 심기 id=%@ req=%@ slot=%@", d[@"id"], d[@"req"], freeSlots[set]);
+                set++;
+            }
+            break;   // one planting per pass — the slot list refreshes after the server answers
+        }
+    }
+    return [NSString stringWithFormat:@"🌰 모종 %d (화분 %d, 익음 %lu, 대기 %lu) / 빈칸 %lu / 뽑기 %d 심기 %d",
+            nSeeds, nPlanted, (unsigned long)ripe.count, (unsigned long)waiting.count,
+            (unsigned long)freeSlots.count, pulled, set];
 }
 
 // ================= Overlay UI =================
@@ -1100,6 +1541,7 @@ static NSString *feedPass(void) {
 - (void)locationManager:(CLLocationManager *)m didUpdateLocations:(NSArray *)locs {
     // Fires in the background too (while the location session is alive), so this is
     // what keeps the automation running when the phone is locked.
+    if (locs.lastObject) gLastLoc = locs.lastObject;
     [NSClassFromString(@"PAOverlay") performSelector:@selector(runDue)];
 }
 - (void)locationManager:(CLLocationManager *)m didFailWithError:(NSError *)e {}
@@ -1124,19 +1566,34 @@ static NSString *feedPass(void) {
 static UIWindow *gWin = nil;
 static UILabel  *gToast = nil;
 static UIButton *gHarvestBtn = nil, *gCollectBtn = nil, *gFeedBtn = nil, *gExpedBtn = nil;
-static NSTimer  *gHarvestTimer = nil, *gCollectTimer = nil, *gFeedTimer = nil;
-static const NSTimeInterval kActionPace = 1.0;   // seconds between auto passes
+static UIButton *gPlantBtn = nil, *gPoiBtn = nil, *gSeedBtn = nil, *gAutoBtn = nil;
+static PAKeepAlive *gKeep = nil;
+static const NSTimeInterval kActionPace = 1.0;   // driver tick
+static const NSTimeInterval kFeedPace    = 30.0; // one nectar to the squad, batch per pass
+static const NSTimeInterval kHarvestPace = 60.0; // petal pick over the squad
+static const NSTimeInterval kCollectPace = 15.0; // complete returned expeditions
+static const NSTimeInterval kExpedPace   = 10.0; // one send-off per pass
+static const NSTimeInterval kPlantPace  = 15.0;  // planting session check
+static const NSTimeInterval kPoiPace    = 3.0;   // big-flower scan
+static const NSTimeInterval kSeedPace   = 20.0;  // seedling plant/pluck
+static const NSTimeInterval kMapPace    = 5.0;   // mapobjects.json refresh
 
 static NSString * const kHarvestKey = @"pa_harvest";
 static NSString * const kCollectKey = @"pa_collect";
 static NSString * const kFeedKey    = @"pa_feed";
 static NSString * const kExpedKey   = @"pa_expedition";
+static NSString * const kPlantKey   = @"pa_plant";
+static NSString * const kPoiKey     = @"pa_poi";
+static NSString * const kSeedKey    = @"pa_seed";
+static NSString * const kAutoKey    = @"pa_auto";      // 자동성장: every toggle at once
 
 // Suppress camera focus whenever any automation toggle is active.
 static void pkSyncFocus(void) {
     NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
     gFocusSuppress = [d boolForKey:kHarvestKey] || [d boolForKey:kCollectKey] ||
-                     [d boolForKey:kFeedKey]    || [d boolForKey:kExpedKey];
+                     [d boolForKey:kFeedKey]    || [d boolForKey:kExpedKey]   ||
+                     [d boolForKey:kPlantKey]   || [d boolForKey:kPoiKey]     ||
+                     [d boolForKey:kSeedKey];
 }
 
 @implementation PAOverlay
@@ -1170,10 +1627,56 @@ static void pkSyncFocus(void) {
     if (now - last < kActionPace - 0.3) return;
     last = now;
     NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
-    if ([d boolForKey:kFeedKey])    PALOG(@"[feed] %@", feedPass());
-    if ([d boolForKey:kHarvestKey]) PALOG(@"[harvest] %@", harvestPass());
-    if ([d boolForKey:kCollectKey]) PALOG(@"[collect] %@", collectPass());
-    if ([d boolForKey:kExpedKey])   PALOG(@"[탐험] %@", expeditionPass());
+    // Each pass on its own cadence. The old driver ran every pass every second,
+    // which meant dozens of RPCs a second while feeding — a request pattern no
+    // real player produces. These paces keep the pipeline moving at a rate
+    // indistinguishable from a busy human.
+    static NSTimeInterval lastFeed = 0, lastHarvest = 0, lastCollect = 0, lastExped = 0;
+    static NSTimeInterval lastPlant = 0, lastPoi = 0, lastSeed = 0, lastMap = 0, lastBg = 0;
+    BOOL bg = [UIApplication sharedApplication].applicationState != UIApplicationStateActive;
+    if (bg && now - lastBg >= 60.0) { lastBg = now; PALOG(@"[bg] alive in background — passes keep running"); }
+    if ([d boolForKey:kFeedKey]    && now - lastFeed    >= kFeedPace)    { lastFeed    = now; PALOG(@"[feed] %@", feedPass()); }
+    if ([d boolForKey:kHarvestKey] && now - lastHarvest >= kHarvestPace) { lastHarvest = now; PALOG(@"[harvest] %@", harvestPass()); }
+    if ([d boolForKey:kCollectKey] && now - lastCollect >= kCollectPace) { lastCollect = now; PALOG(@"[collect] %@", collectPass()); }
+    if ([d boolForKey:kExpedKey]   && now - lastExped   >= kExpedPace)   { lastExped   = now; PALOG(@"[탐험] %@", expeditionPass()); }
+    // 자동성장 passes.
+    if ([d boolForKey:kPlantKey] && now - lastPlant >= kPlantPace) { lastPlant = now; PALOG(@"[심기] %@", plantPass()); }
+    if ([d boolForKey:kPoiKey]   && now - lastPoi   >= kPoiPace)   { lastPoi   = now; PALOG(@"[큰꽃] %@", bigFlowerPass()); }
+    if ([d boolForKey:kSeedKey]  && now - lastSeed  >= kSeedPace)  { lastSeed  = now; PALOG(@"[모종] %@", seedPass()); }
+    if (gMapObj && now - lastMap >= kMapPace) { lastMap = now; mapDumpPass(); }
+}
+
++ (void)syncAllButtons {
+    NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+    [self styleBtn:gFeedBtn    on:[d boolForKey:kFeedKey]    base:@"정수"];
+    [self styleBtn:gHarvestBtn on:[d boolForKey:kHarvestKey] base:@"수확"];
+    [self styleBtn:gCollectBtn on:[d boolForKey:kCollectKey] base:@"수집"];
+    [self styleBtn:gExpedBtn   on:[d boolForKey:kExpedKey]   base:@"탐험"];
+    [self styleBtn:gPlantBtn   on:[d boolForKey:kPlantKey]   base:@"심기"];
+    [self styleBtn:gPoiBtn     on:[d boolForKey:kPoiKey]     base:@"큰꽃"];
+    [self styleBtn:gSeedBtn    on:[d boolForKey:kSeedKey]    base:@"모종"];
+    BOOL all = [d boolForKey:kFeedKey] && [d boolForKey:kHarvestKey] && [d boolForKey:kCollectKey] &&
+               [d boolForKey:kExpedKey] && [d boolForKey:kPlantKey] && [d boolForKey:kPoiKey] && [d boolForKey:kSeedKey];
+    [d setBool:all forKey:kAutoKey];
+    [self styleBtn:gAutoBtn on:all base:@"자동성장"];
+    pkSyncFocus();
+}
++ (void)toggleKey:(NSString *)key {
+    NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+    [d setBool:![d boolForKey:key] forKey:key];
+    [self syncAllButtons];
+}
++ (void)togglePlant { [self toggleKey:kPlantKey]; if ([[NSUserDefaults standardUserDefaults] boolForKey:kPlantKey]) PALOG(@"[심기] %@", plantPass()); }
++ (void)togglePoi   { [self toggleKey:kPoiKey];   if ([[NSUserDefaults standardUserDefaults] boolForKey:kPoiKey])   PALOG(@"[큰꽃] %@", bigFlowerPass()); }
++ (void)toggleSeed  { [self toggleKey:kSeedKey];  if ([[NSUserDefaults standardUserDefaults] boolForKey:kSeedKey])  PALOG(@"[모종] %@", seedPass()); }
+// 자동성장: the whole pipeline on or off in one tap.
++ (void)toggleAuto {
+    NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+    BOOL on = ![d boolForKey:kAutoKey];
+    for (NSString *k in @[kFeedKey, kHarvestKey, kCollectKey, kExpedKey, kPlantKey, kPoiKey, kSeedKey]) [d setBool:on forKey:k];
+    [self syncAllButtons];
+    PALOG(@"[자동성장] %@", on ? @"ON — 정수/수확/수집/탐험/심기/큰꽃/모종 전부" : @"OFF");
+    if (on) [PAOverlay runDue];
 }
 
 + (void)toggleHarvest {
@@ -1250,6 +1753,29 @@ static void pkSyncFocus(void) {
     gHarvestBtn = [self button:@"수확"   y:104 sel:@selector(toggleHarvest) key:kHarvestKey root:root width:w];
     gCollectBtn = [self button:@"수집"   y:144 sel:@selector(toggleCollect) key:kCollectKey root:root width:w];
     gExpedBtn   = [self button:@"탐험"   y:184 sel:@selector(toggleExped)   key:kExpedKey   root:root width:w];
+    gPlantBtn   = [self button:@"심기"   y:224 sel:@selector(togglePlant)   key:kPlantKey   root:root width:w];
+    gPoiBtn     = [self button:@"큰꽃"   y:264 sel:@selector(togglePoi)     key:kPoiKey     root:root width:w];
+    gSeedBtn    = [self button:@"모종"   y:304 sel:@selector(toggleSeed)    key:kSeedKey    root:root width:w];
+    gAutoBtn    = [self button:@"자동성장" y:352 sel:@selector(toggleAuto)  key:kAutoKey    root:root width:w];
+    [self syncAllButtons];
+
+    // Our own location feed — whatever CoreLocation (or the GPS Wander tweak
+    // underneath it) reports is where the game believes we are; the big-flower
+    // range check and seedling planting point use it.
+    // Background too: the game declares the location background mode (its own
+    // background planting relies on it), so a session with background updates
+    // allowed keeps this process alive with the screen off, and every fix that
+    // arrives — GPS Wander pushes one a second — drives runDue.
+    gKeep = [PAKeepAlive new];
+    gLoc = [CLLocationManager new];
+    gLoc.delegate = gKeep;
+    gLoc.desiredAccuracy = kCLLocationAccuracyBest;
+    gLoc.distanceFilter = kCLDistanceFilterNone;
+    gLoc.pausesLocationUpdatesAutomatically = NO;
+    @try { gLoc.allowsBackgroundLocationUpdates = YES; }
+    @catch (NSException *e) { PALOG(@"[keepalive] no background location: %@", e); }
+    [gLoc startUpdatingLocation];
+    PALOG(@"[keepalive] location session started (bg=%d)", (int)gLoc.allowsBackgroundLocationUpdates);
 
     // Foreground automation driver — runs the enabled passes every kActionPace.
     // (Background execution was intentionally dropped; the app suspends when it is
@@ -1262,7 +1788,7 @@ static void pkSyncFocus(void) {
     PALOG(@"[ui] overlay ready");
     __block int hb = 0;
     [NSTimer scheduledTimerWithTimeInterval:1.0 repeats:YES block:^(NSTimer *tm){
-        for (UIButton *b in @[gFeedBtn, gHarvestBtn, gCollectBtn, gExpedBtn])
+        for (UIButton *b in @[gFeedBtn, gHarvestBtn, gCollectBtn, gExpedBtn, gPlantBtn, gPoiBtn, gSeedBtn, gAutoBtn])
             if (b.superview) [b.superview bringSubviewToFront:b];
         if ([UIApplication sharedApplication].applicationState != UIApplicationStateActive) return;
         pkInstallHooks();
@@ -1278,6 +1804,8 @@ static void pkSyncFocus(void) {
     // Toggles that were on before relaunch keep running via the master timer above;
     // just restore the focus-suppress state to match.
     pkSyncFocus();
+    if (![[NSUserDefaults standardUserDefaults] boolForKey:kAutoKey])
+        PALOG(@"[ui] 자동성장 OFF — 버튼으로 켜면 전 파이프라인 가동");
 }
 @end
 
