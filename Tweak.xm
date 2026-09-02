@@ -1009,12 +1009,22 @@ static NSArray *pkExpeditionCandidates(void) {
 // Tasks we have already sent this session, keyed by ExpeditionItemData.Key, with
 // the time we sent them — see the cooldown check below.
 static NSMutableDictionary<NSString *, NSNumber *> *gExpSent = nil;
+static NSMutableDictionary<NSString *, NSNumber *> *gExpTries = nil;
 static const NSTimeInterval kExpCooldown = 30.0;
+// A task the server keeps refusing must not be retried forever: the wait
+// doubles with each attempt that left it Available, up to an hour.
+static NSTimeInterval pkExpWait(NSString *key) {
+    int n = [gExpTries[key] intValue];
+    NSTimeInterval w = kExpCooldown;
+    for (int i = 1; i < n && w < 3600.0; i++) w *= 3.0;
+    return MIN(w, 3600.0);
+}
 
 // One expedition per pass, so the request rate stays ordinary and the log reads
 // one line per send-off.
 static NSString *expeditionPass(void) {
     if (!gExpSent) gExpSent = [NSMutableDictionary dictionary];
+    if (!gExpTries) gExpTries = [NSMutableDictionary dictionary];
     if (!gExpStore) { PALOG(@"[탐험] 스토어 미포착 — 지도에 탐험이 뜨면 잡힘"); return @"탐험 목록 대기 (지도에 탐험이 보이면 잡힘)"; }
     NSArray *exps = pkExpeditions();
     if (!exps.count) { PALOG(@"[탐험] 스토어 비어 있음"); return @"탐험 없음"; }
@@ -1045,7 +1055,9 @@ static NSString *expeditionPass(void) {
         void *proto = pkInvoke(pkMethod(f_object_get_class(inv), "get_Proto", 0), inv, NULL);
         if (!proto) continue;
         if (*(int*)((char*)proto + 0x50) != PK_TASK_EXPEDITION) continue;  // taskCase_
-        if (*(long long*)((char*)proto + 0x18) != 0) continue;             // startTimeMs_ — running
+        // The game's own state machine, not our reading of startTimeMs_:
+        // Available 0, Outgoing 1, AtSpawn 2, Incoming 3, Returned 4.
+        if (pkIntProp(d, "get_State") != 0) continue;
         seen++;
         void *dCls = f_object_get_class(d);
         // startTimeMs_ only flips once the server has answered, so a second pass
@@ -1055,7 +1067,8 @@ static NSString *expeditionPass(void) {
         NSString *tkey = pkStr(pkInvoke(pkMethod(dCls, "get_Key", 0), d, NULL));
         if (tkey) {
             NSNumber *when = gExpSent[tkey];
-            if (when && [NSDate date].timeIntervalSince1970 - when.doubleValue < kExpCooldown) continue;
+            // Still Available after a send means the server did not take it.
+            if (when && [NSDate date].timeIntervalSince1970 - when.doubleValue < pkExpWait(tkey)) continue;
         }
         void *mWhy = pkMethod(dCls, "get_StartDisabledReason", 0);
         // StartDisabledReason is recomputed from the party currently assigned, so
@@ -1101,11 +1114,17 @@ static NSString *expeditionPass(void) {
         if (!mStart) { pkAssignPikmins(d, @[]); return @"StartExpeditionAsync 없음"; }
         pkInvoke(mStart, d, NULL);
         NSString *key = tkey ?: @"?";
-        if (tkey) gExpSent[tkey] = @([NSDate date].timeIntervalSince1970);
-        PALOG(@"[탐험] 출발 task=%@ 피크민 %lu마리 (최대 %d)", key, (unsigned long)picked.count, maxN);
+        int tries = 0;
+        if (tkey) {
+            gExpSent[tkey] = @([NSDate date].timeIntervalSince1970);
+            tries = [gExpTries[tkey] intValue] + 1;
+            gExpTries[tkey] = @(tries);
+        }
+        PALOG(@"[탐험] 출발 task=%@ 피크민 %lu마리 (최대 %d, %d번째 시도%@)", key, (unsigned long)picked.count, maxN,
+              tries, tries > 1 ? [NSString stringWithFormat:@", 다음 대기 %.0f초", pkExpWait(key)] : @"");
         return [NSString stringWithFormat:@"🚀 탐험 출발 — 피크민 %lu마리", (unsigned long)picked.count];
     }
-    return seen ? [NSString stringWithFormat:@"보낼 수 있는 탐험 없음 (대기 %d건)", seen]
+    return seen ? [NSString stringWithFormat:@"보낼 수 있는 탐험 없음 (미출발 %d건)", seen]
                 : @"대기 중인 탐험 없음";
 }
 
@@ -1366,7 +1385,10 @@ static void mapDumpPass(void) {
 // IsWithinRange && HasCapacity. We check the first three from the map object and
 // our own position; the server answers with FailedReason for the rest.
 static NSMutableDictionary<NSString *, NSNumber *> *gPoiTried = nil;
-static const double kPoiRangeM = 40.0;           // interaction range we assume (server enforces its own)
+// PoiInteractionSettings.DEFAULT_POI_FLOWER_RANGE = 100 m — the game's own
+// range for a big flower (campaigns carry their own interactionRangeMeter_).
+// A tighter guess (40 m) meant we never even asked while standing 56 m away.
+static const double kPoiRangeM = 100.0;
 static const NSTimeInterval kPoiRetry = 180.0;    // seconds before re-asking for the same flower
 static NSString *bigFlowerPass(void) {
     if (!gMapObj) return @"맵 오브젝트 대기";
@@ -1401,7 +1423,18 @@ static NSString *bigFlowerPass(void) {
         }
         if (sent >= 2) break;
     }
-    return [NSString stringWithFormat:@"🌼 큰꽃 %d / 만개 %d / 사정권 %d / 요청 %d", nFlower, nBloom, nNear, sent];
+    // Did the last claim take? The server flips visitRewardReceived_ on the map
+    // object, so the flag is the answer — no response parsing needed.
+    static NSUInteger lastClaimed = 0;
+    NSUInteger claimed = 0;
+    for (NSDictionary *o in objs)
+        if ([o[@"kind"] intValue] == PK_MO_POIFLOWER && [o[@"visited"] boolValue]) claimed++;
+    if (claimed != lastClaimed) {
+        PALOG(@"[큰꽃] 채집 완료 표시 %lu → %lu", (unsigned long)lastClaimed, (unsigned long)claimed);
+        lastClaimed = claimed;
+    }
+    return [NSString stringWithFormat:@"🌼 큰꽃 %d / 만개 %d / 사정권(≤%.0fm) %d / 요청 %d / 채집됨 %lu",
+            nFlower, nBloom, kPoiRangeM, nNear, sent, (unsigned long)claimed];
 }
 
 // ---------- feature: 꽃 심기 (keep a planting session running) ----------
