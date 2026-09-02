@@ -271,6 +271,29 @@ static void *hook_picksend2(void *self, void *req, void *ct, int retry, void *mi
     return orig_picksend2(self, req, ct, retry, mi);
 }
 
+// Observe every SetPikminSeed RPC — the game's manual planting and ours — so
+// the two requests can be compared field by field.
+// SetPikminSeedRequestProto: seedId_ @0x18, point_ @0x20, slotOption_ @0x28 {slotIndex_ @0x18}.
+static void pkLogSeedReq(const char *tag, void *req) {
+    if (!req) return;
+    void *seed = *(void**)((char*)req + 0x18);
+    void *pt   = *(void**)((char*)req + 0x20);
+    void *so   = *(void**)((char*)req + 0x28);
+    PALOG(@"[seedRPC:%s] seed='%@' point=%@ slot=%@", tag, pkStr(seed) ?: @"",
+          pt ? [NSString stringWithFormat:@"(%.6f,%.6f)", *(double*)((char*)pt + 0x18), *(double*)((char*)pt + 0x20)] : @"null",
+          so ? [NSString stringWithFormat:@"%d", *(int*)((char*)so + 0x18)] : @"null");
+}
+static void *(*orig_seedsend)(void*, void*, void*, int, void*);
+static void *hook_seedsend(void *self, void *req, void *ct, int retry, void *mi) {
+    pkLogSeedReq("R", req);
+    return orig_seedsend(self, req, ct, retry, mi);
+}
+static void *(*orig_seedsend2)(void*, void*, void*, int, void*);
+static void *hook_seedsend2(void *self, void *req, void *ct, int retry, void *mi) {
+    pkLogSeedReq("P", req);
+    return orig_seedsend2(self, req, ct, retry, mi);
+}
+
 // Capture the game's own feed path: PikminActionManager.ScheduleFeedPikminAsync
 // (string pikminId, string itemId). When the user feeds manually, this logs the
 // exact itemId that works and captures the manager instance for us to reuse.
@@ -375,6 +398,10 @@ static void pkInstallHooks(void) {
     if (mPS) { void *fp = *(void**)mPS; if (fp) f_MSHookFunction(fp, (void*)hook_picksend, (void**)&orig_picksend); }
     void *mPS2 = f_class_get_method_from_name(rpcCls, "SendPickPikminFlowersRpcAsync", 3);
     if (mPS2) { void *fp = *(void**)mPS2; if (fp) f_MSHookFunction(fp, (void*)hook_picksend2, (void**)&orig_picksend2); }
+    void *mSS = f_class_get_method_from_name(rpcCls, "SendSetPikminSeedRpcForResultAsync", 3);
+    if (mSS) { void *fp = *(void**)mSS; if (fp) f_MSHookFunction(fp, (void*)hook_seedsend, (void**)&orig_seedsend); }
+    void *mSS2 = f_class_get_method_from_name(rpcCls, "SendSetPikminSeedRpcAsync", 3);
+    if (mSS2) { void *fp = *(void**)mSS2; if (fp) f_MSHookFunction(fp, (void*)hook_seedsend2, (void**)&orig_seedsend2); }
     // Capture the game's own feed path (manual feeds reveal the working itemId).
     void *actCls = pkFindClass("Niantic.Ichigo.Game", "PikminActionManager");
     void *mSchF = actCls ? f_class_get_method_from_name(actCls, "ScheduleFeedPikminAsync", 2) : NULL;
@@ -1416,6 +1443,15 @@ static NSString *plantPass(void) {
     NSArray *petals = pkPetals();
     long long plain = 0, special = 0;
     for (NSDictionary *p in petals) { if ([p[@"special"] boolValue]) special += [p[@"num"] intValue]; else plain += [p[@"num"] intValue]; }
+    static NSTimeInterval lastCensus = 0;
+    if ([NSDate date].timeIntervalSince1970 - lastCensus > 300) {   // what we hold, every 5 min
+        lastCensus = [NSDate date].timeIntervalSince1970;
+        NSMutableArray *bits = [NSMutableArray array];
+        for (NSDictionary *p in petals)
+            [bits addObject:[NSString stringWithFormat:@"c%@k%@x%@%@", p[@"color"], p[@"kind"], p[@"num"],
+                             [p[@"special"] boolValue] ? @"*" : @""]];
+        PALOG(@"[심기] 꽃잎 재고: %@", [bits componentsJoinedByString:@" "]);
+    }
     if (started) return [NSString stringWithFormat:@"🌱 심는 중 (일반 꽃잎 %lld, 특수 %lld)", plain, special];
     if (plain <= 0) return [NSString stringWithFormat:@"🌱 일반 꽃잎 없음 (특수 %lld 보존)", special];
     pkNectarCensus();
@@ -1500,7 +1536,12 @@ static NSString *seedPass(void) {
             [freeSlots addObject:@(idx)];
         });
     });
-    if (freeSlots.count && waiting.count && gLastLoc) {
+    // Until a planting is seen to take (planted count goes up), do not keep
+    // trying with the next seed every pass — one attempt, then wait 5 minutes.
+    static NSTimeInterval lastTry = 0; static int plantedAtTry = -1;
+    BOOL took = nPlanted > plantedAtTry;
+    BOOL mayPlant = (now - lastTry >= 300.0) || took;
+    if (freeSlots.count && waiting.count && gLastLoc && mayPlant) {
         [waiting sortUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) {
             return [a[@"req"] compare:b[@"req"]];
         }];
@@ -1519,6 +1560,7 @@ static NSString *seedPass(void) {
             if (!so) { PALOG(@"[모종] SlotOptionProto 클래스 못 찾음"); break; }
             *(int*)((char*)so + 0x18) = [freeSlots[set] intValue];                    // slotIndex_
             *(void**)((char*)req + 0x28) = so;                                         // slotOption_
+            lastTry = now; plantedAtTry = nPlanted;
             if (pkSendRpc("SendSetPikminSeedRpcForResultAsync", req)) {
                 gSeedSent[d[@"id"]] = @(now);
                 PALOG(@"[모종] 심기 id=%@ req=%@ slot=%@", d[@"id"], d[@"req"], freeSlots[set]);
