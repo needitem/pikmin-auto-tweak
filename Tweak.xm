@@ -156,6 +156,19 @@ static void PALOG(NSString *fmt, ...) {
     @finally { [fh closeFile]; }
 }
 
+// Same, but only when the text has actually changed (or three minutes have
+// passed). Every pass prints a status line; repeating an unchanged one every
+// few seconds is what took pa.log to three quarters of a megabyte in a single
+// session, and those writes count against the app's background disk budget.
+static void PKLOGC(NSString *key, NSString *msg) {
+    static NSMutableDictionary *lastMsg = nil, *lastAt = nil;
+    if (!lastMsg) { lastMsg = [NSMutableDictionary dictionary]; lastAt = [NSMutableDictionary dictionary]; }
+    NSTimeInterval now = [NSDate date].timeIntervalSince1970;
+    if ([lastMsg[key] isEqualToString:msg] && now - [lastAt[key] doubleValue] < 180.0) return;
+    lastMsg[key] = msg; lastAt[key] = @(now);
+    PALOG(@"%@", msg);
+}
+
 // Read an Il2CppString into an NSString (len @0x10, UTF-16 chars @0x14).
 static NSString *pkStr(void *s) {
     if (!s) return nil;
@@ -235,7 +248,8 @@ static void pkLogFeedReq(const char *tag, void *req) {
     }
     void *itemId = *(void**)((char*)req + 0x20);
     int numItems = *(int*)((char*)req + 0x28);
-    PALOG(@"[feedRPC:%s] pikminCount=%d itemId='%@' numItems=%d", tag, pcnt, pkStr(itemId) ?: @"", numItems);
+    PKLOGC([NSString stringWithFormat:@"feedRPC.%s", tag],
+           ([NSString stringWithFormat:@"[feedRPC:%s] pikminCount=%d itemId='%@' numItems=%d", tag, pcnt, pkStr(itemId) ?: @"", numItems]));
 }
 static void *(*orig_feedsend)(void*, void*, void*, int, void*);
 static void *hook_feedsend(void *self, void *req, void *ct, int retry, void *mi) {
@@ -258,7 +272,8 @@ static void pkLogPickReq(const char *tag, void *req) {
         if (!fc) fc = f_class_get_field_from_name(rfCls, "_count");
         if (fc) pcnt = *(int*)((char*)rf + f_field_get_offset(fc));
     }
-    PALOG(@"[pickRPC:%s] pikminCount=%d", tag, pcnt);
+    PKLOGC([NSString stringWithFormat:@"pickRPC.%s", tag],
+           ([NSString stringWithFormat:@"[pickRPC:%s] pikminCount=%d", tag, pcnt]));
 }
 static void *(*orig_picksend)(void*, void*, void*, int, void*);
 static void *hook_picksend(void *self, void *req, void *ct, int retry, void *mi) {
@@ -675,7 +690,7 @@ static NSArray *pkNectar(void) {
             [out addObject:@{ @"id": [NSValue valueWithPointer:idStr], @"balls": @(use), @"type": @(type) }];
     }
     static int dumpN = 0;
-    if (dumpN++ % 4 == 0)   // periodic histogram so we can verify the type read
+    if (dumpN++ % 20 == 0)  // periodic histogram; rare, it is only a sanity check
         PALOG(@"[nectar] conf W%lld R%lld B%lld Y%lld H%lld | pred W%lld R%lld B%lld Y%lld H%lld",
               confByType[1],confByType[2],confByType[3],confByType[4],confByType[5],
               predByType[1],predByType[2],predByType[3],predByType[4],predByType[5]);
@@ -721,7 +736,7 @@ static void autoNumberPass(void) {
         if (idStr && ![cur isEqualToString:want])
             [todo addObject:@[ [NSValue valueWithPointer:idStr], want ]];
     }
-    PALOG(@"[number] total=%lu mismatches=%lu", (unsigned long)total, (unsigned long)todo.count);
+    PKLOGC(@"number", ([NSString stringWithFormat:@"[number] total=%lu mismatches=%lu", (unsigned long)total, (unsigned long)todo.count]));
     if (!todo.count) return;
     __block NSUInteger k = 0;
     gNumTimer = [NSTimer scheduledTimerWithTimeInterval:0.4 repeats:YES block:^(NSTimer *tm) {
@@ -999,9 +1014,9 @@ static NSArray *pkExpeditionCandidates(void) {
               (unsigned long)all.count, [bits componentsJoinedByString:@" "],
               nBusy, nStarred, held, need, troopTotal, troopKey ?: @"ent", minTroop);
     } else {
-        PALOG(@"[탐험] 후보 %lu마리 (부대원 포함 %d[%@ pi=%d ip=%d ent=%d], 부대유보 %d, 부대 %d, 최소 %d)",
+        PKLOGC(@"exp.pool", ([NSString stringWithFormat:@"[탐험] 후보 %lu마리 (부대원 포함 %d[%@ pi=%d ip=%d ent=%d], 부대유보 %d, 부대 %d, 최소 %d)",
               (unsigned long)out.count, poolInTroop, troopKey ?: @"ent", nPI, nIP, nEnt,
-              held, troopTotal, minTroop);
+              held, troopTotal, minTroop]));
     }
     return out;
 }
@@ -1041,8 +1056,8 @@ static NSString *expeditionPass(void) {
             nExp++;
             if (*(long long*)((char*)pr + 0x18) == 0) nIdle++;
         }
-        PALOG(@"[탐험] 스토어 %lu건 / 탐험 %d건 / 미출발 %d건",
-              (unsigned long)exps.count, nExp, nIdle);
+        PKLOGC(@"exp.census", ([NSString stringWithFormat:@"[탐험] 스토어 %lu건 / 탐험 %d건 / 미출발 %d건",
+              (unsigned long)exps.count, nExp, nIdle]));
     }
     NSArray *cands = pkExpeditionCandidates();
     if (!cands.count) return @"보낼 피크민 없음";
@@ -1098,8 +1113,8 @@ static NSString *expeditionPass(void) {
         }
         if (!ready) {
             pkAssignPikmins(d, @[]);            // leave the local proto as we found it
-            PALOG(@"[탐험] 힘 부족 — 후보 %lu, 뽑음 %lu, 최대 %d",
-                  (unsigned long)cands.count, (unsigned long)picked.count, maxN);
+            PKLOGC(@"exp.weak", ([NSString stringWithFormat:@"[탐험] 힘 부족 — 후보 %lu, 뽑음 %lu, 최대 %d",
+                  (unsigned long)cands.count, (unsigned long)picked.count, maxN]));
             continue;
         }
         // Now that a party is assigned, the game's own veto is meaningful: out of
@@ -1107,7 +1122,7 @@ static NSString *expeditionPass(void) {
         void *why = pkInvoke(mWhy, d, NULL);
         if (why) {
             pkAssignPikmins(d, @[]);
-            PALOG(@"[탐험] 건너뜀 — %@", pkStr(why) ?: @"불가");
+                PKLOGC(@"exp.skip", ([NSString stringWithFormat:@"[탐험] 건너뜀 — %@", pkStr(why) ?: @"불가"]));
             continue;
         }
         void *mStart = pkMethod(dCls, "StartExpeditionAsync", 0);
@@ -1141,27 +1156,9 @@ static NSString *feedPass(void) {
         total += [d[@"balls"] longLongValue];
         if (!best || [d[@"balls"] intValue] > [best[@"balls"] intValue]) best = d;
     }
-    PALOG(@"[feed] allowed kinds=%lu total=%lld", (unsigned long)nectar.count, total);
+    PKLOGC(@"feed.kinds", ([NSString stringWithFormat:@"[feed] allowed kinds=%lu total=%lld", (unsigned long)nectar.count, total]));
     if (total <= 0 || !best) return @"🍯 정수 소진 — 급여 완료";
-    PALOG(@"[feed] best itemId='%@' type=%@ balls=%@",
-          pkStr([best[@"id"] pointerValue]), best[@"type"], best[@"balls"]);
-    // Diagnostic: the first deployed Pikmin's flower state — feeding a maxed flower
-    // is a server no-op. PikminProto: numFlowers_@0x38, flowerState_@0x48,
-    // flowerStateFlowerCount_@0x58, wiltedCount_@0x5C.
-    {
-        void *fl = *(void**)((char*)gMgr + 0x68);
-        void *fa = fl ? *(void**)((char*)fl + 0x10) : NULL;
-        int fs = fl ? *(int*)((char*)fl + 0x18) : 0;
-        if (fa && fs > 0) {
-            void *pk0 = *(void**)((char*)fa + 0x20);
-            void *pr0 = pk0 ? *(void**)((char*)pk0 + 0xC0) : NULL;
-            if (pr0)
-                PALOG(@"[feed] flower0 numFlowers=%d state=%d stateCnt=%d wilt=%d",
-                      *(int*)((char*)pr0 + 0x38), *(int*)((char*)pr0 + 0x48),
-                      *(int*)((char*)pr0 + 0x58), *(int*)((char*)pr0 + 0x5C));
-        }
-    }
-    PALOG(@"[feed] step1 squad read");
+
     // Only deployed (squad) Pikmin can be fed — waiting ones are rejected server-side.
     NSArray *squad = pkSquad();
     // A Pikmin whose flower is already at its max petals is rejected server-side
@@ -1186,8 +1183,7 @@ static NSString *feedPass(void) {
         if (pkFeedBatch(@[ v ], nid, 1)) sent++;
     }
     cursor = (cursor + kMaxPerPass) % ids.count;
-    PALOG(@"[feed] per-pikmin RPCs sent=%d itemId='%@' (squad %lu, cursor %lu)", sent, pkStr(nid) ?: @"",
-          (unsigned long)ids.count, (unsigned long)cursor);
+
     return [NSString stringWithFormat:@"🍯 대열급여 %d마리(1개씩) type%@ / 정수총 %lld",
             sent, best[@"type"], total];
 }
@@ -1208,6 +1204,11 @@ static NSString *feedPass(void) {
 // ---------- current (spoofed) location ----------
 static CLLocationManager *gLoc = nil;
 static CLLocation *gLastLoc = nil;                // whatever CoreLocation (or GPS Wander) hands us
+// How the location feed is behaving. If the app is suspended these stop
+// moving, which is the difference between "throttled" and "asleep" — the only
+// way to tell why the app stopped working with the screen off.
+static unsigned long gLocCount = 0;
+static NSTimeInterval gLocLast = 0;
 static double pkDistM(double lat1, double lng1, double lat2, double lng2) {
     double r = 6371000.0, p = M_PI / 180.0;
     double dlat = (lat2 - lat1) * p, dlng = (lng2 - lng1) * p;
@@ -1363,34 +1364,52 @@ static NSArray *pkMapObjects(void) {
     return out;
 }
 
-// Dump the current map objects + our position to Documents/mapobjects.json so
-// GPS Wander can draw them and route the walk through the big flowers.
+// Hand GPS Wander the map objects it routes by. Only the kinds it can use are
+// written — big flowers and mushrooms — and only when the set has actually
+// changed. The first cut wrote all ~580 objects (79 KB) every five seconds to
+// two files, about a gigabyte a day of writes inside an app iOS already had a
+// diskwrites report against; the walk needs a couple of kilobytes a minute.
 static void mapDumpPass(void) {
     NSArray *objs = pkMapObjects();
     if (!objs) return;
     NSMutableArray *rows = [NSMutableArray array];
     for (NSDictionary *o in objs) {
+        int kind = [o[@"kind"] intValue];
+        if (kind != PK_MO_POIFLOWER && kind != PK_MO_MUSHROOM) continue;
         [rows addObject:@{ @"id": o[@"id"], @"kind": o[@"kind"], @"lat": o[@"lat"], @"lng": o[@"lng"],
                            @"state": o[@"state"], @"color": o[@"color"], @"bloom": o[@"bloom"],
                            @"visited": o[@"visited"] }];
     }
-    NSDictionary *doc = @{ @"t": @([NSDate date].timeIntervalSince1970),
+    NSData *body = [NSJSONSerialization dataWithJSONObject:rows options:NSJSONWritingSortedKeys error:nil];
+    if (!body) return;
+    // Position moves constantly, so it must not count as a change on its own;
+    // compare the objects alone and rewrite at most once a minute otherwise.
+    static NSUInteger lastHash = 0;
+    static NSTimeInterval lastWrite = 0;
+    NSTimeInterval now = [NSDate date].timeIntervalSince1970;
+    NSUInteger h = body.hash;
+    if (h == lastHash && now - lastWrite < 60.0) return;
+    lastHash = h; lastWrite = now;
+
+    NSDictionary *doc = @{ @"t": @(now),
                            @"lat": @(gLastLoc ? gLastLoc.coordinate.latitude : 0),
                            @"lng": @(gLastLoc ? gLastLoc.coordinate.longitude : 0),
                            @"objs": rows };
     NSData *json = [NSJSONSerialization dataWithJSONObject:doc options:0 error:nil];
     if (!json) return;
-    NSString *path = [[NSHomeDirectory() stringByAppendingPathComponent:@"Documents"]
-                      stringByAppendingPathComponent:@"mapobjects.json"];
-    [json writeToFile:path atomically:YES];
-    // A copy where GPS Wander looks first. The sandbox may refuse; say so once.
+    // One copy, where GPS Wander looks first; the sandbox may refuse it, and
+    // only then is the in-container path worth writing.
     static int sharedState = -1;
     NSError *e = nil;
     BOOL ok = [json writeToFile:@"/var/jb/var/mobile/Library/GPSWander/mapobjects.json"
                         options:NSDataWritingAtomic error:&e];
+    if (!ok)
+        [json writeToFile:[[NSHomeDirectory() stringByAppendingPathComponent:@"Documents"]
+                           stringByAppendingPathComponent:@"mapobjects.json"] atomically:YES];
     if ((int)ok != sharedState) {
         sharedState = ok;
-        PALOG(@"[map] shared copy %@%@", ok ? @"written" : @"refused", ok ? @"" : [NSString stringWithFormat:@" — %@", e.localizedDescription]);
+        PALOG(@"[map] %lu개 기록, 공유 경로 %@%@", (unsigned long)rows.count, ok ? @"성공" : @"거부",
+              ok ? @"" : [NSString stringWithFormat:@" — %@", e.localizedDescription]);
     }
 }
 
@@ -1403,7 +1422,12 @@ static NSMutableDictionary<NSString *, NSNumber *> *gPoiTried = nil;
 // range for a big flower (campaigns carry their own interactionRangeMeter_).
 // A tighter guess (40 m) meant we never even asked while standing 56 m away.
 static const double kPoiRangeM = 100.0;
-static const NSTimeInterval kPoiRetry = 180.0;    // seconds before re-asking for the same flower
+// The server judges the range against the location the game last reported to
+// it, not the one we are standing on this instant, so asking from 99 m out
+// mostly failed. Ask only from comfortably inside, and ask again soon — the
+// walk is routed past the flower, so a closer approach is coming.
+static const double kPoiSendM  = 65.0;
+static const NSTimeInterval kPoiRetry = 45.0;
 static NSString *bigFlowerPass(void) {
     if (!gMapObj) return @"맵 오브젝트 대기";
     if (!gRpc) return @"서버 준비 대기";
@@ -1423,6 +1447,7 @@ static NSString *bigFlowerPass(void) {
         double d = pkDistM(mlat, mlng, [o[@"lat"] doubleValue], [o[@"lng"] doubleValue]);
         if (d > kPoiRangeM) continue;
         nNear++;
+        if (d > kPoiSendM) continue;                  // wait until we are closer
         NSString *mid = o[@"id"];
         NSNumber *when = gPoiTried[mid];
         if (when && now - when.doubleValue < kPoiRetry) continue;
@@ -1451,8 +1476,8 @@ static NSString *bigFlowerPass(void) {
         PALOG(@"[큰꽃] 채집 완료 표시 %lu → %lu", (unsigned long)lastClaimed, (unsigned long)claimed);
         lastClaimed = claimed;
     }
-    return [NSString stringWithFormat:@"🌼 큰꽃 %d / 만개 %d / 사정권(≤%.0fm) %d / 요청 %d / 채집됨 %lu",
-            nFlower, nBloom, kPoiRangeM, nNear, sent, (unsigned long)claimed];
+    return [NSString stringWithFormat:@"🌼 큰꽃 %d / 만개 %d / 사정권(≤%.0fm) %d / 요청(≤%.0fm) %d / 채집됨 %lu",
+            nFlower, nBloom, kPoiRangeM, nNear, kPoiSendM, sent, (unsigned long)claimed];
 }
 
 // ---------- feature: 꽃 심기 (keep a planting session running) ----------
@@ -1646,7 +1671,11 @@ static NSString *seedPass(void) {
 - (void)locationManager:(CLLocationManager *)m didUpdateLocations:(NSArray *)locs {
     // Fires in the background too (while the location session is alive), so this is
     // what keeps the automation running when the phone is locked.
-    if (locs.lastObject) gLastLoc = locs.lastObject;
+    if (locs.lastObject) {
+        gLastLoc = locs.lastObject;
+        gLocCount++;
+        gLocLast = [NSDate date].timeIntervalSince1970;
+    }
     [NSClassFromString(@"PAOverlay") performSelector:@selector(runDue)];
 }
 - (void)locationManager:(CLLocationManager *)m didFailWithError:(NSError *)e {}
@@ -1679,9 +1708,9 @@ static const NSTimeInterval kHarvestPace = 60.0; // petal pick over the squad
 static const NSTimeInterval kCollectPace = 15.0; // complete returned expeditions
 static const NSTimeInterval kExpedPace   = 10.0; // one send-off per pass
 static const NSTimeInterval kPlantPace  = 15.0;  // planting session check
-static const NSTimeInterval kPoiPace    = 3.0;   // big-flower scan
+static const NSTimeInterval kPoiPace    = 6.0;   // big-flower scan
 static const NSTimeInterval kSeedPace   = 20.0;  // seedling plant/pluck
-static const NSTimeInterval kMapPace    = 5.0;   // mapobjects.json refresh
+static const NSTimeInterval kMapPace    = 20.0;  // mapobjects.json refresh
 
 static NSString * const kHarvestKey = @"pa_harvest";
 static NSString * const kCollectKey = @"pa_collect";
@@ -1726,10 +1755,22 @@ static void pkSyncFocus(void) {
 // and the background location callback (which keeps firing while the app is alive
 // in the background), so automation continues when the phone is locked. A time
 // throttle keeps the two sources from double-firing.
+// A pass result that has not changed says nothing new. Repeating it every few
+// seconds is how pa.log reached three quarters of a megabyte in one session,
+// and the writes count against the app's background disk budget.
++ (void)logPass:(NSString *)tag msg:(NSString *)msg {
+    PKLOGC([@"pass." stringByAppendingString:tag], ([NSString stringWithFormat:@"[%@] %@", tag, msg]));
+}
+
 + (void)runDue {
     static NSTimeInterval last = 0;
     NSTimeInterval now = [NSDate date].timeIntervalSince1970;
-    if (now - last < kActionPace - 0.3) return;
+    // Backgrounded, everything runs a third as often. Sustained work with the
+    // screen off is what gets a background app suspended and then terminated,
+    // and nothing here needs second-by-second attention.
+    BOOL background = [UIApplication sharedApplication].applicationState != UIApplicationStateActive;
+    double pace = background ? 3.0 : 1.0;
+    if (now - last < kActionPace * pace - 0.3) return;
     last = now;
     NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
     // Each pass on its own cadence. The old driver ran every pass every second,
@@ -1738,17 +1779,15 @@ static void pkSyncFocus(void) {
     // indistinguishable from a busy human.
     static NSTimeInterval lastFeed = 0, lastHarvest = 0, lastCollect = 0, lastExped = 0;
     static NSTimeInterval lastPlant = 0, lastPoi = 0, lastSeed = 0, lastMap = 0, lastBg = 0;
-    BOOL bg = [UIApplication sharedApplication].applicationState != UIApplicationStateActive;
-    if (bg && now - lastBg >= 60.0) { lastBg = now; PALOG(@"[bg] alive in background — passes keep running"); }
-    if ([d boolForKey:kFeedKey]    && now - lastFeed    >= kFeedPace)    { lastFeed    = now; PALOG(@"[feed] %@", feedPass()); }
-    if ([d boolForKey:kHarvestKey] && now - lastHarvest >= kHarvestPace) { lastHarvest = now; PALOG(@"[harvest] %@", harvestPass()); }
-    if ([d boolForKey:kCollectKey] && now - lastCollect >= kCollectPace) { lastCollect = now; PALOG(@"[collect] %@", collectPass()); }
-    if ([d boolForKey:kExpedKey]   && now - lastExped   >= kExpedPace)   { lastExped   = now; PALOG(@"[탐험] %@", expeditionPass()); }
-    // 자동성장 passes.
-    if ([d boolForKey:kPlantKey] && now - lastPlant >= kPlantPace) { lastPlant = now; PALOG(@"[심기] %@", plantPass()); }
-    if ([d boolForKey:kPoiKey]   && now - lastPoi   >= kPoiPace)   { lastPoi   = now; PALOG(@"[큰꽃] %@", bigFlowerPass()); }
-    if ([d boolForKey:kSeedKey]  && now - lastSeed  >= kSeedPace)  { lastSeed  = now; PALOG(@"[모종] %@", seedPass()); }
-    if (gMapObj && now - lastMap >= kMapPace) { lastMap = now; mapDumpPass(); }
+    if (background && now - lastBg >= 300.0) { lastBg = now; PALOG(@"[bg] 백그라운드에서 계속 동작 중"); }
+    if ([d boolForKey:kFeedKey]    && now - lastFeed    >= kFeedPace * pace)    { lastFeed    = now; [self logPass:@"feed"    msg:feedPass()]; }
+    if ([d boolForKey:kHarvestKey] && now - lastHarvest >= kHarvestPace * pace) { lastHarvest = now; [self logPass:@"harvest" msg:harvestPass()]; }
+    if ([d boolForKey:kCollectKey] && now - lastCollect >= kCollectPace * pace) { lastCollect = now; [self logPass:@"collect" msg:collectPass()]; }
+    if ([d boolForKey:kExpedKey]   && now - lastExped   >= kExpedPace * pace)   { lastExped   = now; [self logPass:@"탐험"  msg:expeditionPass()]; }
+    if ([d boolForKey:kPlantKey]   && now - lastPlant   >= kPlantPace * pace)   { lastPlant   = now; [self logPass:@"심기"  msg:plantPass()]; }
+    if ([d boolForKey:kPoiKey]     && now - lastPoi     >= kPoiPace * pace)     { lastPoi     = now; [self logPass:@"큰꽃"  msg:bigFlowerPass()]; }
+    if ([d boolForKey:kSeedKey]    && now - lastSeed    >= kSeedPace * pace)    { lastSeed    = now; [self logPass:@"모종"  msg:seedPass()]; }
+    if (gMapObj && now - lastMap >= kMapPace * pace) { lastMap = now; mapDumpPass(); }
 }
 
 + (void)syncAllButtons {
@@ -1895,11 +1934,11 @@ static void pkSyncFocus(void) {
     [NSTimer scheduledTimerWithTimeInterval:1.0 repeats:YES block:^(NSTimer *tm){
         for (UIButton *b in @[gFeedBtn, gHarvestBtn, gCollectBtn, gExpedBtn, gPlantBtn, gPoiBtn, gSeedBtn, gAutoBtn])
             if (b.superview) [b.superview bringSubviewToFront:b];
-        if ([UIApplication sharedApplication].applicationState != UIApplicationStateActive) return;
         pkInstallHooks();
-        if (++hb % 5 == 0) {
-            PALOG(@"[hb] rpc=%d mgr=%d inv=%d pikmin=%lu", gRpc!=NULL, gMgr!=NULL, gInv()!=NULL,
-                  (unsigned long)pkAllPikmin().count);
+        if (++hb % 60 == 0) {
+            PALOG(@"[hb] rpc=%d mgr=%d inv=%d pikmin=%lu | 위치 %lu회, 마지막 %.0f초 전",
+                  gRpc!=NULL, gMgr!=NULL, gInv()!=NULL, (unsigned long)pkAllPikmin().count,
+                  gLocCount, gLocLast ? [NSDate date].timeIntervalSince1970 - gLocLast : -1);
         }
     }];
     // Numbering runs on its own slow cadence (idempotent).
