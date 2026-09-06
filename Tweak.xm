@@ -450,6 +450,31 @@ static void pkInstallHooks(void) {
           rpcCls, mgrCls, mGP, mBA, mGF, mAU, mGK, focCls, mSF, installed);
 }
 
+// How long each pass actually takes. Without this, tuning the cadences is
+// guesswork: a pass that costs 4 ms can run every second, one that costs 300 ms
+// cannot. Reported by the heartbeat as total-ms/calls.
+static NSMutableDictionary<NSString *, NSNumber *> *gPassMs = nil, *gPassN = nil;
+static NSString *pkTime(NSString *name, NSString *(^body)(void)) {
+    if (!gPassMs) { gPassMs = [NSMutableDictionary dictionary]; gPassN = [NSMutableDictionary dictionary]; }
+    NSTimeInterval t0 = CACurrentMediaTime();
+    NSString *r = body();
+    double ms = (CACurrentMediaTime() - t0) * 1000.0;
+    gPassMs[name] = @([gPassMs[name] doubleValue] + ms);
+    gPassN[name]  = @([gPassN[name] intValue] + 1);
+    return r;
+}
+static NSString *pkPassTimings(void) {
+    if (!gPassN.count) return @"-";
+    NSMutableArray *bits = [NSMutableArray array];
+    for (NSString *k in [gPassN.allKeys sortedArrayUsingSelector:@selector(compare:)]) {
+        int n = [gPassN[k] intValue];
+        if (!n) continue;
+        [bits addObject:[NSString stringWithFormat:@"%@ %.0f/%d", k, [gPassMs[k] doubleValue], n]];
+    }
+    [gPassMs removeAllObjects]; [gPassN removeAllObjects];
+    return [bits componentsJoinedByString:@" "];
+}
+
 // ---------- generic il2cpp call helpers ----------
 static void *pkMethod(void *cls, const char *name, int argc) {
     return cls ? f_class_get_method_from_name(cls, name, argc) : NULL;
@@ -681,13 +706,21 @@ static NSArray *pkNectar(void) {
         NSString *fkind = pkStr(*(void**)((char*)proto + 0x28));   // flowerKind_
         int np = prd ? pkProtoBalls(prd) : n;              // predicted count
         if (type >= 0 && type < 8) { confByType[type] += (n > 0 ? n : 0); predByType[type] += (np > 0 ? np : 0); }
-        // Only PLAIN colour nectar (empty flowerKind) grows any flower. Flower-specific
-        // nectar (e.g. flowerKind "canna", a long itemId) is a server no-op for a broad
-        // feed — that is what stalled the nectar total.
-        BOOL plain = (fkind.length == 0);
+        // Plain colour nectar grows any flower. Flower-specific nectar (a
+        // flowerKind such as "canna") only takes while the Pikmin's head is
+        // still a leaf or a bud — feed it to an open flower and the server
+        // does nothing, which is what made it look useless. Both kinds are
+        // returned now, tagged, and feedPass sends each where it works.
+        int hkind = *(int*)((char*)proto + 0x20);          // honeyFlowerKind_
+        // FlowerKind 5 is COMMON — the ordinary nectar, despite carrying a
+        // kind. Only a named flower (rose, canna, …) is the special sort that
+        // decides what a bud opens into.
+        BOOL special = (fkind.length > 0) || (hkind != 0 && hkind != 5);
         int use = np;                                      // predicted count = what the user sees
-        if (idStr && use > 0 && use < 100000 && pkNectarAllowed(type) && plain)
-            [out addObject:@{ @"id": [NSValue valueWithPointer:idStr], @"balls": @(use), @"type": @(type) }];
+        if (idStr && use > 0 && use < 100000 && pkNectarAllowed(type))
+            [out addObject:@{ @"id": [NSValue valueWithPointer:idStr], @"balls": @(use),
+                              @"type": @(type), @"special": @(special), @"hkind": @(hkind),
+                              @"kindName": fkind ?: @"" }];
     }
     static int dumpN = 0;
     if (dumpN++ % 20 == 0)  // periodic histogram; rare, it is only a sanity check
@@ -754,12 +787,28 @@ static void autoNumberPass(void) {
     }];
 }
 
+// A Pikmin's own head, PikminProto.flowerState_ @0x48 — not to be confused
+// with the big-flower states of a map POI further down.
+#define PK_PF_LEAF   1
+#define PK_PF_BUD    3
+#define PK_PF_FLOWER 4
+#define PK_PF_PICK   5
+#define PK_PF_WILTED 6
+
 // ---------- feature: harvest flowers (all owned pikmin) ----------
 static NSString *harvestPass(void) {
     if (!gMgr || !gRpc) return @"게임/서버 준비 대기";
     // Only deployed (squad) Pikmin grow flowers to pick, so target just those.
-    NSArray *ids = pkSquadIds(pkSquad());
-    if (!ids.count) return @"🌸 대열에 피크민 없음";
+    // Only Pikmin actually holding petals; asking the other thirty every
+    // minute was the bulk of this pass's work and picked nothing.
+    NSMutableArray *ids = [NSMutableArray array];
+    NSUInteger squadN = 0;
+    for (NSDictionary *p in pkSquad()) {
+        squadN++;
+        if ([p[@"nflw"] intValue] > 0 || [p[@"state"] intValue] == PK_PF_PICK) [ids addObject:p[@"id"]];
+    }
+    if (!squadN) return @"🌸 대열에 피크민 없음";
+    if (!ids.count) return @"🌸 딸 꽃잎 없음";
     // Prefer the game's OWN harvest path: PikminActionManager.SchedulePickPikminFlower-
     // BatchedRequest(pikminId). The raw PickPikminFlowers RPC was silently rejected
     // (flowers never emptied), same as feed — the game method takes the right id
@@ -769,7 +818,7 @@ static NSString *harvestPass(void) {
         if (m) {
             int n = 0;
             for (NSValue *v in ids) { void *pid = [v pointerValue]; void *a[1] = { pid }; if (pkInvoke(m, gAction, a)) n++; (void)n; }
-            return [NSString stringWithFormat:@"🌸 수확(게임경로) %lu마리", (unsigned long)ids.count];
+            return [NSString stringWithFormat:@"🌸 수확 %lu마리 (대열 %lu)", (unsigned long)ids.count, (unsigned long)squadN];
         }
     }
     void *cls = NULL;
@@ -1009,7 +1058,22 @@ static int pkMinTroop(void) {
 //
 // Busy Pikmin (status Task — already on an expedition or a carry) are the only
 // hard exclusion; favourites are kept home as a courtesy, as before.
+// The roster and the candidate list are the two expensive scans in here: each
+// walks 250 Pikmin making two il2cpp calls apiece, and the candidate pass asks
+// the game twice per Pikmin which way round its troop test takes arguments.
+// That was roughly a thousand runtime invocations every ten seconds, all to
+// answer a question whose answer barely changes. Both are cached briefly.
+static NSArray *gCandCache = nil;
+static NSTimeInterval gCandAt = 0;
+static NSArray *pkExpeditionCandidatesUncachedList(void);
 static NSArray *pkExpeditionCandidates(void) {
+    NSTimeInterval now = CACurrentMediaTime();
+    if (gCandCache && now - gCandAt < 20.0) return gCandCache;
+    gCandCache = (NSArray *)(id)pkExpeditionCandidatesUncachedList();
+    gCandAt = now;
+    return gCandCache;
+}
+static NSArray *pkExpeditionCandidatesUncachedList(void) {
     NSArray *all = pkAllPikmin();                  // already sorted by pluck time
     if (!all.count) return nil;
     void *inv = gInv();
@@ -1130,6 +1194,13 @@ static NSString *expeditionPass(void) {
     NSArray *cands = pkExpeditionCandidates();
     if (!cands.count) return @"보낼 피크민 없음";
 
+    // Several send-offs per pass. One per pass meant an expedition every ten
+    // seconds at best, half a minute in the background, so a full board took
+    // minutes to clear. Pikmin already committed this pass are held back so
+    // two expeditions never claim the same ones.
+    NSMutableSet<NSValue *> *committed = [NSMutableSet set];
+    const int kExpPerPass = 4;
+    int launched = 0, lastParty = 0;
     int seen = 0;
     for (NSValue *ev in exps) {
         void *d = [ev pointerValue];
@@ -1167,6 +1238,7 @@ static NSString *expeditionPass(void) {
         BOOL ready = NO;
         for (NSDictionary *c in cands) {
             if ((int)picked.count >= maxN) break;
+            if ([committed containsObject:c[@"id"]]) continue;
             void *item = [c[@"item"] pointerValue];
             if (mAllows) {
                 void *a[1] = { item };
@@ -1205,8 +1277,14 @@ static NSString *expeditionPass(void) {
         }
         PALOG(@"[탐험] 출발 task=%@ 피크민 %lu마리 (최대 %d, %d번째 시도%@)", key, (unsigned long)picked.count, maxN,
               tries, tries > 1 ? [NSString stringWithFormat:@", 다음 대기 %.0f초", pkExpWait(key)] : @"");
-        return [NSString stringWithFormat:@"🚀 탐험 출발 — 피크민 %lu마리", (unsigned long)picked.count];
+        [committed addObjectsFromArray:picked];
+        gCandAt = 0;                            // the roster just changed
+        lastParty = (int)picked.count;
+        if (++launched >= kExpPerPass) break;
     }
+    if (launched)
+        return [NSString stringWithFormat:@"🚀 탐험 %d건 출발 (마지막 %d마리, 후보 %lu)",
+                launched, lastParty, (unsigned long)cands.count];
     return seen ? [NSString stringWithFormat:@"보낼 수 있는 탐험 없음 (미출발 %d건)", seen]
                 : @"대기 중인 탐험 없음";
 }
@@ -1215,45 +1293,90 @@ static NSString *expeditionPass(void) {
 // Each pass feeds up to kFeedPerTick Pikmin one nectar each, cycling through the
 // nectar kinds we hold, until no nectar is left. Conservative batch size keeps
 // the request rate ordinary and lets the log show nectar draining pass by pass.
+// Feed the squad, matching the nectar to what each Pikmin's head is doing.
+//
+// PikminProto.flowerState_ @0x48: 1 LEAF, 3 BUD, 4 FLOWER,
+// 5 FLOWER_READY_TO_PICK, 6 WILTED. A leaf or a bud has not decided which
+// flower it will open into, and that is the only window in which
+// flower-specific ("special") nectar does anything — spend it there. An open
+// flower takes plain colour nectar to add petals. One already ready to pick
+// is the harvest pass's business, not ours.
+//
+// Ids go five to a request, the shape the game's own feed uses, so the whole
+// squad is served in a handful of calls instead of one Pikmin every few
+// seconds. Feeding 39 Pikmin used to take five minutes of passes.
 static NSString *feedPass(void) {
     if (!gMgr || !gRpc) return @"게임/서버 준비 대기";
-    NSArray *nectar = pkNectar();                       // allowed kinds (W/R/B/Y), predicted balls
-    long long total = 0;
-    NSDictionary *best = nil;
+    NSArray *nectar = pkNectar();
+    NSMutableArray *plain = [NSMutableArray array], *special = [NSMutableArray array];
+    long long totPlain = 0, totSpecial = 0;
     for (NSDictionary *d in nectar) {
-        total += [d[@"balls"] longLongValue];
-        if (!best || [d[@"balls"] intValue] > [best[@"balls"] intValue]) best = d;
+        if ([d[@"special"] boolValue]) { [special addObject:d]; totSpecial += [d[@"balls"] longLongValue]; }
+        else                           { [plain   addObject:d]; totPlain   += [d[@"balls"] longLongValue]; }
     }
-    PKLOGC(@"feed.kinds", ([NSString stringWithFormat:@"[feed] allowed kinds=%lu total=%lld", (unsigned long)nectar.count, total]));
-    if (total <= 0 || !best) return @"🍯 정수 소진 — 급여 완료";
+    if (!totPlain && !totSpecial) return @"🍯 정수 없음";
+    NSSortDescriptor *most = [NSSortDescriptor sortDescriptorWithKey:@"balls" ascending:NO];
+    [plain sortUsingDescriptors:@[most]];
+    [special sortUsingDescriptors:@[most]];
+    // Which special nectar to spend. The game keeps the hotbar choice in the
+    // UI only — it is in neither the server prefs nor a stored key — so the
+    // kind we hold most of is the default, and pa_special (a flowerKind name
+    // or a honeyFlowerKind number) pins it to the one the user wants.
+    NSString *want = [[NSUserDefaults standardUserDefaults] stringForKey:@"pa_special"];
+    if (want.length) {
+        for (NSDictionary *d in special) {
+            if ([d[@"kindName"] caseInsensitiveCompare:want] == NSOrderedSame ||
+                [[d[@"hkind"] stringValue] isEqualToString:want]) {
+                [special removeObject:d];
+                [special insertObject:d atIndex:0];
+                break;
+            }
+        }
+    }
+    // What is actually on hand, so the right one can be named.
+    if (special.count) {
+        NSMutableArray *bits = [NSMutableArray array];
+        for (NSDictionary *d in special)
+            [bits addObject:[NSString stringWithFormat:@"%@ %@",
+                             [d[@"kindName"] length] ? d[@"kindName"] : [NSString stringWithFormat:@"kind%@", d[@"hkind"]],
+                             d[@"balls"]]];
+        PKLOGC(@"feed.special", ([NSString stringWithFormat:@"[feed] 특수정수 보유: %@%@",
+               [bits componentsJoinedByString:@", "],
+               want.length ? [NSString stringWithFormat:@" (지정: %@)", want] : @" (지정 없음 — 많은 것부터)"]));
+    }
 
-    // Only deployed (squad) Pikmin can be fed — waiting ones are rejected server-side.
     NSArray *squad = pkSquad();
-    // A Pikmin whose flower is already at its max petals is rejected server-side
-    // (no nectar spent), and harvest keeps the others below max, so this spends
-    // nectar only where there is actually room — without needing the
-    // per-friendship capacity table. (flowerState stays FLOWER even after a
-    // harvest, so it can't be used to tell "has room".)
-    //
-    // Pipeline pacing: the squad is fed in rotation, a handful per pass, one
-    // Pikmin per FeedPikmins RPC (the shape the game's manual feed uses — a
-    // 24-in-one RPC never consumed nectar). Feeding the whole squad every
-    // second was dozens of RPCs a second; this is a few every kFeedPace.
-    NSMutableArray *ids = [NSMutableArray array];
-    for (NSDictionary *d in squad) [ids addObject:d[@"id"]];   // whole squad
-    void *nid = [best[@"id"] pointerValue];
-    if (!ids.count) return @"🍯 대열에 피크민 없음 (배치/출격 필요)";
-    static NSUInteger cursor = 0;
-    const int kMaxPerPass = 8;
-    int sent = 0;
-    for (int k = 0; k < kMaxPerPass && k < (int)ids.count; k++) {
-        NSValue *v = ids[(cursor + k) % ids.count];
-        if (pkFeedBatch(@[ v ], nid, 1)) sent++;
+    if (!squad.count) return @"🍯 대열에 피크민 없음 (배치/출격 필요)";
+    NSMutableArray *budIds = [NSMutableArray array], *flowerIds = [NSMutableArray array];
+    for (NSDictionary *p in squad) {
+        int st = [p[@"state"] intValue];
+        if (st == PK_PF_PICK) continue;                 // harvest first, then feed
+        if (st == PK_PF_LEAF || st == PK_PF_BUD) [budIds addObject:p[@"id"]];
+        else [flowerIds addObject:p[@"id"]];
     }
-    cursor = (cursor + kMaxPerPass) % ids.count;
 
-    return [NSString stringWithFormat:@"🍯 대열급여 %d마리(1개씩) type%@ / 정수총 %lld",
-            sent, best[@"type"], total];
+    // Five ids per request, as the game does.
+    int (^feedGroup)(NSArray *, NSDictionary *) = ^int(NSArray *ids, NSDictionary *kind) {
+        if (!ids.count || !kind) return 0;
+        void *nid = [kind[@"id"] pointerValue];
+        int budget = [kind[@"balls"] intValue];
+        int done = 0;
+        for (NSUInteger i = 0; i < ids.count && done < budget; i += 5) {
+            NSRange r = NSMakeRange(i, MIN((NSUInteger)5, ids.count - i));
+            NSArray *chunk = [ids subarrayWithRange:r];
+            if (pkFeedBatch(chunk, nid, 1)) done += (int)chunk.count;
+        }
+        return done;
+    };
+
+    int fedBud = feedGroup(budIds, special.firstObject ?: plain.firstObject);
+    int fedFlower = feedGroup(flowerIds, plain.firstObject);
+    NSDictionary *sp = special.firstObject;
+    return [NSString stringWithFormat:@"🍯 봉오리/잎 %d마리%@ · 꽃 %d마리(일반) / 일반 %lld 특수 %lld",
+            fedBud,
+            sp ? [NSString stringWithFormat:@"(특수 %@)", [sp[@"kindName"] length] ? sp[@"kindName"] : [NSString stringWithFormat:@"kind%@", sp[@"hkind"]]]
+               : @"(일반)",
+            fedFlower, totPlain, totSpecial];
 }
 
 // ================= 자동성장 (auto-grow) pipeline =================
@@ -1379,7 +1502,20 @@ static void *pkNewPoint(double lat, double lng) {
 //   bloomedTimeMs_ @0x40, visitRewardReceived_ @0x48.
 // PoiFlowerOverlayProto: state_ @0x18, flower_ @0x20 (FlowerPetalProto.flowerType_ @0x18),
 //   lastBloomingMs_ @0x28.
+// One scan, shared. The big-flower pass and the dump both walk the manager's
+// whole dictionary building a dictionary per object; doing it twice within a
+// second or two of each other was pure waste.
+static NSArray *gMapCache = nil;
+static NSTimeInterval gMapAt = 0;
+static NSArray *pkMapObjectsUncached(void);
 static NSArray *pkMapObjects(void) {
+    NSTimeInterval now = CACurrentMediaTime();
+    if (gMapCache && now - gMapAt < 4.0) return gMapCache;
+    gMapCache = pkMapObjectsUncached();
+    gMapAt = now;
+    return gMapCache;
+}
+static NSArray *pkMapObjectsUncached(void) {
     if (!gMapObj || !resolveAPI()) return nil;
     void *dict = *(void**)((char*)gMapObj + 0x70);
     if (!dict) return nil;
@@ -1730,6 +1866,46 @@ static NSString *seedPass(void) {
             (unsigned long)freeSlots.count, pulled, set];
 }
 
+// ---------- keep the game from cooking the phone while it plays itself ----------
+//
+// The automation's own cost is negligible — a measured 50 ms of CPU per minute
+// across every pass. The heat comes from Unity rendering a map nobody is
+// watching at the platform frame rate. UnityEngine.Application.targetFrameRate
+// caps that, and vSyncCount must be 0 or the cap is ignored.
+//
+// Applied only while 자동성장 is on, restored to the platform default (-1) when
+// it goes off, and re-asserted periodically because the game resets it across
+// scene changes.
+static int pkWantedFps(void) {
+    NSInteger v = [[NSUserDefaults standardUserDefaults] integerForKey:@"pa_fps"];
+    if (v <= 0) v = 20;                       // enough to stay usable if glanced at
+    return (int)MIN(MAX(v, 5), 60);
+}
+static void pkApplyFrameRate(BOOL automating) {
+    if (!resolveAPI()) return;
+    static void *appCls = NULL, *qsCls = NULL;
+    if (!appCls) appCls = pkFindClass("UnityEngine", "Application");
+    if (!qsCls)  qsCls  = pkFindClass("UnityEngine", "QualitySettings");
+    if (!appCls) return;
+    void *mGet = pkMethod(appCls, "get_targetFrameRate", 0);
+    void *mSet = pkMethod(appCls, "set_targetFrameRate", 1);
+    if (!mGet || !mSet) return;
+
+    int want = automating ? pkWantedFps() : -1;
+    void *r = pkInvoke(mGet, NULL, NULL);
+    int cur = r ? *(int*)((char*)r + 0x10) : 0;
+    if (cur == want) return;
+
+    if (automating && qsCls) {                // a cap with vSync on does nothing
+        void *mVs = pkMethod(qsCls, "set_vSyncCount", 1);
+        int zero = 0; void *va[1] = { &zero };
+        if (mVs) pkInvoke(mVs, NULL, va);
+    }
+    void *a[1] = { &want };
+    pkInvoke(mSet, NULL, a);
+    PALOG(@"[fps] 목표 프레임 %d → %d", cur, want);
+}
+
 // ================= Overlay UI =================
 // Minimal delegate so the keep-alive location session is treated as active.
 @interface PAKeepAlive : NSObject <CLLocationManagerDelegate>
@@ -1769,16 +1945,18 @@ static UIWindow *gWin = nil;
 static UILabel  *gToast = nil;
 static UIButton *gHarvestBtn = nil, *gCollectBtn = nil, *gFeedBtn = nil, *gExpedBtn = nil;
 static UIButton *gPlantBtn = nil, *gPoiBtn = nil, *gSeedBtn = nil, *gAutoBtn = nil;
+static UIButton *gFab = nil;          // the one handle that is always visible
+static UIView   *gPanel = nil;        // the toggles, shown only when it is tapped
 static PAKeepAlive *gKeep = nil;
 static const NSTimeInterval kActionPace = 1.0;   // driver tick
-static const NSTimeInterval kFeedPace    = 30.0; // one nectar to the squad, batch per pass
-static const NSTimeInterval kHarvestPace = 60.0; // petal pick over the squad
+static const NSTimeInterval kFeedPace    = 15.0; // whole squad, five ids per request
+static const NSTimeInterval kHarvestPace = 15.0; // only the Pikmin holding petals
 static const NSTimeInterval kCollectPace = 15.0; // complete returned expeditions
-static const NSTimeInterval kExpedPace   = 10.0; // one send-off per pass
-static const NSTimeInterval kPlantPace  = 15.0;  // planting session check
+static const NSTimeInterval kExpedPace   = 8.0;  // up to four send-offs per pass
+static const NSTimeInterval kPlantPace  = 30.0;  // planting session check
 static const NSTimeInterval kPoiPace    = 6.0;   // big-flower scan
-static const NSTimeInterval kSeedPace   = 20.0;  // seedling plant/pluck
-static const NSTimeInterval kMapPace    = 20.0;  // mapobjects.json refresh
+static const NSTimeInterval kSeedPace   = 30.0;  // seedling plant/pluck
+static const NSTimeInterval kMapPace    = 30.0;  // mapobjects.json refresh
 
 static NSString * const kHarvestKey = @"pa_harvest";
 static NSString * const kCollectKey = @"pa_collect";
@@ -1811,6 +1989,12 @@ static void pkSyncFocus(void) {
     c.y = MAX(hh, MIN(host.bounds.size.height - hh, c.y));
     g.view.center = c;
     [g setTranslation:CGPointZero inView:host];
+    if (g.view == gFab && gPanel) {
+        // Keep the panel under the handle, and on screen.
+        CGFloat x = MIN(host.bounds.size.width - gPanel.bounds.size.width - 8, MAX(8.0, c.x - gPanel.bounds.size.width + 22));
+        CGFloat y = MIN(host.bounds.size.height - gPanel.bounds.size.height - 8, c.y + 28);
+        gPanel.frame = CGRectMake(x, y, gPanel.bounds.size.width, gPanel.bounds.size.height);
+    }
 }
 
 + (void)styleBtn:(UIButton *)b on:(BOOL)on base:(NSString *)base {
@@ -1848,14 +2032,20 @@ static void pkSyncFocus(void) {
     static NSTimeInterval lastFeed = 0, lastHarvest = 0, lastCollect = 0, lastExped = 0;
     static NSTimeInterval lastPlant = 0, lastPoi = 0, lastSeed = 0, lastMap = 0, lastBg = 0;
     if (background && now - lastBg >= 300.0) { lastBg = now; PALOG(@"[bg] 백그라운드에서 계속 동작 중"); }
-    if ([d boolForKey:kFeedKey]    && now - lastFeed    >= kFeedPace * pace)    { lastFeed    = now; [self logPass:@"feed"    msg:feedPass()]; }
-    if ([d boolForKey:kHarvestKey] && now - lastHarvest >= kHarvestPace * pace) { lastHarvest = now; [self logPass:@"harvest" msg:harvestPass()]; }
-    if ([d boolForKey:kCollectKey] && now - lastCollect >= kCollectPace * pace) { lastCollect = now; [self logPass:@"collect" msg:collectPass()]; }
-    if ([d boolForKey:kExpedKey]   && now - lastExped   >= kExpedPace * pace)   { lastExped   = now; [self logPass:@"탐험"  msg:expeditionPass()]; }
-    if ([d boolForKey:kPlantKey]   && now - lastPlant   >= kPlantPace * pace)   { lastPlant   = now; [self logPass:@"심기"  msg:plantPass()]; }
-    if ([d boolForKey:kPoiKey]     && now - lastPoi     >= kPoiPace * pace)     { lastPoi     = now; [self logPass:@"큰꽃"  msg:bigFlowerPass()]; }
-    if ([d boolForKey:kSeedKey]    && now - lastSeed    >= kSeedPace * pace)    { lastSeed    = now; [self logPass:@"모종"  msg:seedPass()]; }
-    if (gMapObj && now - lastMap >= kMapPace * pace) { lastMap = now; mapDumpPass(); }
+    // Only worth doing in the foreground — a backgrounded Unity draws nothing.
+    static NSTimeInterval lastFps = 0;
+    if (!background && now - lastFps >= 20.0) {
+        lastFps = now;
+        pkApplyFrameRate([d boolForKey:kAutoKey] || [d boolForKey:kFeedKey] || [d boolForKey:kExpedKey]);
+    }
+    if ([d boolForKey:kFeedKey]    && now - lastFeed    >= kFeedPace * pace)    { lastFeed    = now; [self logPass:@"feed"    msg:pkTime(@"feed", ^{ return feedPass(); })]; }
+    if ([d boolForKey:kHarvestKey] && now - lastHarvest >= kHarvestPace * pace) { lastHarvest = now; [self logPass:@"harvest" msg:pkTime(@"harvest", ^{ return harvestPass(); })]; }
+    if ([d boolForKey:kCollectKey] && now - lastCollect >= kCollectPace * pace) { lastCollect = now; [self logPass:@"collect" msg:pkTime(@"collect", ^{ return collectPass(); })]; }
+    if ([d boolForKey:kExpedKey]   && now - lastExped   >= kExpedPace * pace)   { lastExped   = now; [self logPass:@"탐험"  msg:pkTime(@"탐험", ^{ return expeditionPass(); })]; }
+    if ([d boolForKey:kPlantKey]   && now - lastPlant   >= kPlantPace * pace)   { lastPlant   = now; [self logPass:@"심기"  msg:pkTime(@"심기", ^{ return plantPass(); })]; }
+    if ([d boolForKey:kPoiKey]     && now - lastPoi     >= kPoiPace * pace)     { lastPoi     = now; [self logPass:@"큰꽃"  msg:pkTime(@"큰꽃", ^{ return bigFlowerPass(); })]; }
+    if ([d boolForKey:kSeedKey]    && now - lastSeed    >= kSeedPace * pace)    { lastSeed    = now; [self logPass:@"모종"  msg:pkTime(@"모종", ^{ return seedPass(); })]; }
+    if (gMapObj && now - lastMap >= kMapPace * pace) { lastMap = now; pkTime(@"map", ^{ mapDumpPass(); return @""; }); }
 }
 
 + (void)syncAllButtons {
@@ -1888,6 +2078,7 @@ static void pkSyncFocus(void) {
     for (NSString *k in @[kFeedKey, kHarvestKey, kCollectKey, kExpedKey, kPlantKey, kPoiKey, kSeedKey]) [d setBool:on forKey:k];
     [self syncAllButtons];
     PALOG(@"[자동성장] %@", on ? @"ON — 정수/수확/수집/탐험/심기/큰꽃/모종 전부" : @"OFF");
+    pkApplyFrameRate(on);
     if (on) [PAOverlay runDue];
 }
 
@@ -1921,20 +2112,29 @@ static void pkSyncFocus(void) {
     if (on) [PAOverlay runDue];     // via the throttle, so the next tick does not re-run it
 }
 
+// Eight buttons pinned down the side covered the map. Now a single small
+// handle sits out of the way and everything lives in a panel it opens.
 + (UIButton *)button:(NSString *)base y:(CGFloat)y sel:(SEL)sel key:(NSString *)key root:(UIView *)root width:(CGFloat)w {
     BOOL on = [[NSUserDefaults standardUserDefaults] boolForKey:key];
     UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
-    b.frame = CGRectMake(w - 110, y, 96, 34);
+    b.frame = CGRectMake(8, y, w - 16, 36);
     [b setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    b.titleLabel.font = [UIFont boldSystemFontOfSize:13];
-    b.layer.cornerRadius = 8; b.layer.zPosition = 100000;
+    b.titleLabel.font = [UIFont boldSystemFontOfSize:14];
+    b.layer.cornerRadius = 9;
     b.backgroundColor = on ? [[UIColor systemGreenColor] colorWithAlphaComponent:0.9]
                            : [[UIColor systemGrayColor] colorWithAlphaComponent:0.85];
     [b setTitle:[NSString stringWithFormat:@"%@ %@", on ? @"☑" : @"☐", base] forState:UIControlStateNormal];
     [b addTarget:self action:sel forControlEvents:UIControlEventTouchUpInside];
-    [b addGestureRecognizer:[[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(drag:)]];
     [root addSubview:b];
     return b;
+}
+
++ (void)togglePanel {
+    gPanel.hidden = !gPanel.hidden;
+    if (!gPanel.hidden) {
+        [self syncAllButtons];
+        [gPanel.superview bringSubviewToFront:gPanel];
+    }
 }
 
 + (void)ensure {
@@ -1961,14 +2161,37 @@ static void pkSyncFocus(void) {
     UIView *root = vc.view;
     CGFloat w = win.bounds.size.width;
 
-    gFeedBtn    = [self button:@"정수"   y:64  sel:@selector(toggleFeed)    key:kFeedKey    root:root width:w];
-    gHarvestBtn = [self button:@"수확"   y:104 sel:@selector(toggleHarvest) key:kHarvestKey root:root width:w];
-    gCollectBtn = [self button:@"수집"   y:144 sel:@selector(toggleCollect) key:kCollectKey root:root width:w];
-    gExpedBtn   = [self button:@"탐험"   y:184 sel:@selector(toggleExped)   key:kExpedKey   root:root width:w];
-    gPlantBtn   = [self button:@"심기"   y:224 sel:@selector(togglePlant)   key:kPlantKey   root:root width:w];
-    gPoiBtn     = [self button:@"큰꽃"   y:264 sel:@selector(togglePoi)     key:kPoiKey     root:root width:w];
-    gSeedBtn    = [self button:@"모종"   y:304 sel:@selector(toggleSeed)    key:kSeedKey    root:root width:w];
-    gAutoBtn    = [self button:@"자동성장" y:352 sel:@selector(toggleAuto)  key:kAutoKey    root:root width:w];
+    // The handle: small, draggable, always on top, and the only thing on
+    // screen until it is tapped.
+    UIButton *fab = [UIButton buttonWithType:UIButtonTypeSystem];
+    fab.frame = CGRectMake(w - 56, 70, 44, 44);
+    fab.layer.cornerRadius = 22;
+    fab.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.55];
+    fab.titleLabel.font = [UIFont systemFontOfSize:20];
+    [fab setTitle:@"🌱" forState:UIControlStateNormal];
+    [fab addTarget:self action:@selector(togglePanel) forControlEvents:UIControlEventTouchUpInside];
+    [fab addGestureRecognizer:[[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(drag:)]];
+    fab.layer.zPosition = 100001;
+    [root addSubview:fab];
+    gFab = fab;
+
+    UIView *panel = [[UIView alloc] initWithFrame:CGRectMake(w - 190, 120, 178, 8 + 8 * 40)];
+    panel.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.72];
+    panel.layer.cornerRadius = 12;
+    panel.layer.zPosition = 100000;
+    panel.hidden = YES;
+    [root addSubview:panel];
+    gPanel = panel;
+    CGFloat pw = panel.bounds.size.width;
+
+    gAutoBtn    = [self button:@"자동성장" y:8   sel:@selector(toggleAuto)    key:kAutoKey    root:panel width:pw];
+    gFeedBtn    = [self button:@"정수"    y:48  sel:@selector(toggleFeed)    key:kFeedKey    root:panel width:pw];
+    gHarvestBtn = [self button:@"수확"    y:88  sel:@selector(toggleHarvest) key:kHarvestKey root:panel width:pw];
+    gCollectBtn = [self button:@"수집"    y:128 sel:@selector(toggleCollect) key:kCollectKey root:panel width:pw];
+    gExpedBtn   = [self button:@"탐험"    y:168 sel:@selector(toggleExped)   key:kExpedKey   root:panel width:pw];
+    gPlantBtn   = [self button:@"심기"    y:208 sel:@selector(togglePlant)   key:kPlantKey   root:panel width:pw];
+    gPoiBtn     = [self button:@"큰꽃"    y:248 sel:@selector(togglePoi)     key:kPoiKey     root:panel width:pw];
+    gSeedBtn    = [self button:@"모종"    y:288 sel:@selector(toggleSeed)    key:kSeedKey    root:panel width:pw];
     [self syncAllButtons];
 
     // Our own location feed — whatever CoreLocation (or the GPS Wander tweak
@@ -1981,7 +2204,11 @@ static void pkSyncFocus(void) {
     gKeep = [PAKeepAlive new];
     gLoc = [CLLocationManager new];
     gLoc.delegate = gKeep;
-    gLoc.desiredAccuracy = kCLLocationAccuracyBest;
+    // The position every consumer sees is substituted anyway, so asking the
+    // GPS chip for its best fix only heats the phone. Hundred-metre accuracy
+    // is served from wifi and cell and still counts as an active location
+    // session, which is what keeps us alive in the background.
+    gLoc.desiredAccuracy = kCLLocationAccuracyHundredMeters;
     gLoc.distanceFilter = kCLDistanceFilterNone;
     gLoc.pausesLocationUpdatesAutomatically = NO;
     @try { gLoc.allowsBackgroundLocationUpdates = YES; }
@@ -2000,13 +2227,20 @@ static void pkSyncFocus(void) {
     PALOG(@"[ui] overlay ready");
     __block int hb = 0;
     [NSTimer scheduledTimerWithTimeInterval:1.0 repeats:YES block:^(NSTimer *tm){
-        for (UIButton *b in @[gFeedBtn, gHarvestBtn, gCollectBtn, gExpedBtn, gPlantBtn, gPoiBtn, gSeedBtn, gAutoBtn])
-            if (b.superview) [b.superview bringSubviewToFront:b];
+        if (gFab.superview) [gFab.superview bringSubviewToFront:gFab];
+        if (gPanel && !gPanel.hidden && gPanel.superview) [gPanel.superview bringSubviewToFront:gPanel];
         pkInstallHooks();
         if (++hb % 60 == 0) {
-            PALOG(@"[hb] rpc=%d mgr=%d inv=%d pikmin=%lu | 위치 %lu회, 마지막 %.0f초 전",
+            // %s takes a C string in the system encoding, which mangles Korean;
+            // NSString arguments go through %@ intact.
+            NSArray *therm = @[ @"정상", @"주의", @"높음", @"위험" ];
+            NSProcessInfoThermalState ts = NSProcessInfo.processInfo.thermalState;
+            UIDevice.currentDevice.batteryMonitoringEnabled = YES;
+            PALOG(@"[hb] rpc=%d mgr=%d inv=%d pikmin=%lu | 위치 %lu회, 마지막 %.0f초 전 | 발열 %@, 배터리 %.0f%% | 패스 %@",
                   gRpc!=NULL, gMgr!=NULL, gInv()!=NULL, (unsigned long)pkAllPikmin().count,
-                  gLocCount, gLocLast ? [NSDate date].timeIntervalSince1970 - gLocLast : -1);
+                  gLocCount, gLocLast ? [NSDate date].timeIntervalSince1970 - gLocLast : -1,
+                  therm[MIN((int)ts, 3)], UIDevice.currentDevice.batteryLevel * 100.0,
+                  pkPassTimings());
         }
     }];
     // Numbering runs on its own slow cadence (idempotent).
