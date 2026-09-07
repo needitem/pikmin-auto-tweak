@@ -313,12 +313,66 @@ static void *hook_seedsend2(void *self, void *req, void *ct, int retry, void *mi
 // (string pikminId, string itemId). When the user feeds manually, this logs the
 // exact itemId that works and captures the manager instance for us to reuse.
 static void *gAction = NULL;                      // PikminActionManager
-// The hotbar choice lives in the game's UI and nowhere else — not in the
-// server prefs, not in the 137 keys of its own preferences file — so it
-// cannot be read. What can be observed is the user actually giving a nectar
-// by hand: this is the game's own feed path, which we never call ourselves,
-// so the itemId passing through it is exactly the one they picked. Remember
-// its flower kind and the automation spends that one from then on.
+// Picking a nectar off the selector reel — the bar the user drags from — runs
+// through HoneyBallObservableList.OnHoneyBallSelectedPreStageAsync, whose one
+// argument is the HoneyBallData that was chosen. That is the selection
+// itself, caught the moment it is made, without waiting for the user to
+// actually feed anyone. (The choice is nowhere else: not the server prefs,
+// not the 137 keys of the game's own preferences file.)
+//
+// HoneyBallData: EntryData @0x18 → HoneyBallEntryData.HoneyBallItem @0x10,
+// a HoneyBallInventoryItem whose proto carries honeyFlowerKind_ and flowerKind_.
+static void pkRememberSpecialFromItem(void *item);
+// The selection itself. ExtractSelectionTracker is the game's holder for
+// "the nectar currently picked" — a caching observable whose SetExtract runs
+// every time the user chooses one off the reel, before anything is fed. Its
+// Extract carries the colour (extractType @0x20) and the nectar type
+// (honeyBallType @0x60 → HoneyBallTypeProto: honeyType_ @0x18,
+// honeyFlowerKind_ @0x1C, flowerKind_ @0x20), which together name exactly
+// one stack in the inventory.
+static void *pkMethod(void *cls, const char *name, int argc);
+static void *pkInvoke(void *method, void *obj, void **args);
+static void pkPinFromExtract(void *extract);
+static void pkReadExtract(void *ex, int *color, int *hkind, NSString **fkind);
+static void *gExtractSel = NULL;                  // live ExtractSelectionTracker
+static void (*orig_setextract)(void*, void*, void*);
+static void hook_setextract(void *self, void *extract, void *mi) {
+    if (self) gExtractSel = self;
+    orig_setextract(self, extract, mi);
+    if (extract) pkPinFromExtract(extract);
+}
+// Waiting for SetExtract is not enough: re-picking the nectar that is already
+// selected is a no-op, so the call never comes and the choice stays invisible.
+// Capturing the tracker itself lets the current selection be read outright —
+// get_MostRecent is the value the game would hand to the next throw.
+static void (*orig_estctor)(void*, void*, void*, void*);
+static void hook_estctor(void *self, void *a, void *b, void *mi) {
+    if (self && !gExtractSel) { gExtractSel = self; PALOG(@"[capture] ExtractSelectionTracker=%p (ctor)", self); }
+    orig_estctor(self, a, b, mi);
+}
+static void pkPinFromCurrentSelection(void) {
+    if (!gExtractSel || !resolveAPI()) return;
+    void *m = pkMethod(f_object_get_class(gExtractSel), "get_MostRecent", 0);
+    void *ex = m ? pkInvoke(m, gExtractSel, NULL) : NULL;
+    if (!ex) {
+        PKLOGC(@"sel.none", @"[feed] 게임에 선택된 정수 없음 — 보유량 기준 자동 선택");
+        return;
+    }
+    int color = 0, hkind = 0; NSString *fkind = nil;
+    pkReadExtract(ex, &color, &hkind, &fkind);
+    PKLOGC(@"sel.cur", ([NSString stringWithFormat:@"[feed] 게임에서 선택 중: 색%d kind%d '%@'",
+                         color, hkind, fkind ?: @""]));
+    pkPinFromExtract(ex);
+}
+static void (*orig_hbselect)(void*, void*, void*);
+static void hook_hbselect(void *self, void *honeyBallData, void *mi) {
+    if (honeyBallData) {
+        void *entry = *(void**)((char*)honeyBallData + 0x18);
+        void *item  = entry ? *(void**)((char*)entry + 0x10) : NULL;
+        if (item) pkRememberSpecialFromItem(item);
+    }
+    orig_hbselect(self, honeyBallData, mi);
+}
 static void pkRememberSpecial(void *itemIdStr);
 static void *(*orig_schedfeed)(void*, void*, void*, void*);
 static void *hook_schedfeed(void *self, void *pikId, void *itemId, void *mi) {
@@ -435,6 +489,16 @@ static void pkInstallHooks(void) {
     if (mSS2) { void *fp = *(void**)mSS2; if (fp) f_MSHookFunction(fp, (void*)hook_seedsend2, (void**)&orig_seedsend2); }
     // Capture the game's own feed path (manual feeds reveal the working itemId).
     void *actCls = pkFindClass("Niantic.Ichigo.Game", "PikminActionManager");
+    void *estCls = pkFindClass("Niantic.Ichigo.Game.Garden.Extracts", "ExtractSelectionTracker");
+    void *mSetEx = estCls ? f_class_get_method_from_name(estCls, "SetExtract", 1) : NULL;
+    if (mSetEx) { void *fp = *(void**)mSetEx; if (fp) f_MSHookFunction(fp, (void*)hook_setextract, (void**)&orig_setextract); }
+    void *mEstC = estCls ? f_class_get_method_from_name(estCls, ".ctor", 2) : NULL;
+    if (mEstC) { void *fp = *(void**)mEstC; if (fp) f_MSHookFunction(fp, (void*)hook_estctor, (void**)&orig_estctor); }
+    PALOG(@"[hooks] estCls=%p SetExtract=%p ctor=%p", estCls, mSetEx, mEstC);
+    void *hbCls = pkFindClass("Niantic.Ichigo.Game.Garden.Extracts.Scroll", "HoneyBallObservableList");
+    void *mHbSel = hbCls ? f_class_get_method_from_name(hbCls, "OnHoneyBallSelectedPreStageAsync", 1) : NULL;
+    if (mHbSel) { void *fp = *(void**)mHbSel; if (fp) f_MSHookFunction(fp, (void*)hook_hbselect, (void**)&orig_hbselect); }
+    PALOG(@"[hooks] hbCls=%p 정수선택=%p", hbCls, mHbSel);
     void *mSchF = actCls ? f_class_get_method_from_name(actCls, "ScheduleFeedPikminAsync", 2) : NULL;
     if (mSchF) { void *fp = *(void**)mSchF; if (fp) f_MSHookFunction(fp, (void*)hook_schedfeed, (void**)&orig_schedfeed); }
     void *mPamC = actCls ? f_class_get_method_from_name(actCls, ".ctor", 0) : NULL;
@@ -760,22 +824,100 @@ static NSArray *pkNectar(void) {
 // Match a fed itemId against the nectar we hold and pin its kind as the one
 // to spend on buds. A plain colour nectar clears the pin instead, so handing
 // out an ordinary one says "no particular flower".
+// The chosen nectar, however we came by it: its item id pins the exact stack,
+// so colour is included — two lisianthus stacks of different colours are
+// different ids. A plain colour nectar clears the pin.
+static void pkPinNectar(NSString *itemId, BOOL special, NSString *kindName, int hkind, int type, NSString *how) {
+    NSUserDefaults *u = [NSUserDefaults standardUserDefaults];
+    if (!special) {
+        if ([u stringForKey:@"pa_special"] || [u stringForKey:@"pa_special_id"]) {
+            [u removeObjectForKey:@"pa_special"];
+            [u removeObjectForKey:@"pa_special_id"];
+            PALOG(@"[feed] 특수정수 지정 해제 — 일반 정수를 %@", how);
+        }
+        return;
+    }
+    NSString *kind = kindName.length ? kindName : [NSString stringWithFormat:@"kind%d", hkind];
+    if ([[u stringForKey:@"pa_special_id"] isEqualToString:itemId]) return;
+    [u setObject:kind forKey:@"pa_special"];
+    [u setObject:itemId forKey:@"pa_special_id"];
+    PALOG(@"[feed] 특수정수 지정: %@ (색%d, id=%@) — %@", kind, type, itemId, how);
+}
+static void pkRememberSpecialFromItem(void *item) {
+    if (!item || !resolveAPI()) return;
+    void *itCls = f_object_get_class(item);
+    void *idStr = pkInvoke(pkMethod(itCls, "get_Id", 0), item, NULL);
+    void *proto = pkInvoke(pkMethod(itCls, "get_Proto", 0), item, NULL);
+    if (!idStr || !proto) return;
+    int type  = *(int*)((char*)proto + 0x1C);          // honeyType_ (colour)
+    int hkind = *(int*)((char*)proto + 0x20);          // honeyFlowerKind_
+    NSString *fkind = pkStr(*(void**)((char*)proto + 0x28));
+    BOOL special = (fkind.length > 0) || (hkind != 0 && hkind != 5);
+    pkPinNectar(pkStr(idStr) ?: @"", special, fkind, hkind, type, @"선택함");
+}
+// Turn the chosen Extract into the inventory stack it refers to: same colour,
+// same flower kind. That id is what feeding spends, so the colour the user
+// picked is honoured — two lisianthus stacks of different colours are two
+// different ids and only one of them is theirs.
+// Read a chosen Extract. The flower it belongs to is on the Extract itself —
+// flowerKind @0x28, a FlowerKind object carrying id ("lisianthus") @0x18 and
+// the enum @0x20. honeyBallType @0x60 also has a kind but comes back empty
+// for the reel's entries, which is why a red lisianthus first read as plain
+// red nectar.
+static void pkReadExtract(void *ex, int *color, int *hkind, NSString **fkind) {
+    *color = *(int*)((char*)ex + 0x20);                // extractType (colour)
+    void *fk = *(void**)((char*)ex + 0x28);            // FlowerKind
+    if (fk) {
+        *fkind = pkStr(*(void**)((char*)fk + 0x18));   // FlowerKind.id
+        *hkind = *(int*)((char*)fk + 0x20);            // FlowerKind.kind
+    }
+    if (!(*fkind).length) {                            // fall back to the proto
+        void *hbt = *(void**)((char*)ex + 0x60);
+        if (hbt) {
+            if (!*hkind) *hkind = *(int*)((char*)hbt + 0x1C);
+            *fkind = pkStr(*(void**)((char*)hbt + 0x20));
+        }
+    }
+}
+static void pkPinFromExtract(void *extract) {
+    if (!extract || !resolveAPI()) return;
+    int color = 0, hkind = 0; NSString *fkind = nil;
+    pkReadExtract(extract, &color, &hkind, &fkind);
+    BOOL special = (fkind.length > 0) || (hkind != 0 && hkind != 5);
+    if (!special) { pkPinNectar(@"", NO, nil, 0, color, @"골랐음"); return; }
+    // Match on colour and the flower's name. The kind number is not comparable
+    // across the two sides: the catalog's FlowerKind for lisianthus is 55,
+    // while the inventory proto's honeyFlowerKind_ is a different encoding —
+    // insisting they agree found nothing at all.
+    NSArray *held = pkNectar();
+    for (NSDictionary *d in held) {
+        if ([d[@"type"] intValue] != color) continue;
+        if (fkind.length && [d[@"kindName"] caseInsensitiveCompare:fkind] != NSOrderedSame) continue;
+        if (!fkind.length && [d[@"hkind"] intValue] != hkind) continue;
+        pkPinNectar(pkStr([d[@"id"] pointerValue]) ?: @"", YES, d[@"kindName"],
+                    [d[@"hkind"] intValue], color, @"골랐음");
+        return;
+    }
+    // Same flower, any colour, rather than give up entirely.
+    for (NSDictionary *d in held) {
+        if (!fkind.length || [d[@"kindName"] caseInsensitiveCompare:fkind] != NSOrderedSame) continue;
+        pkPinNectar(pkStr([d[@"id"] pointerValue]) ?: @"", YES, d[@"kindName"],
+                    [d[@"hkind"] intValue], [d[@"type"] intValue], @"골랐음(색 불일치)");
+        return;
+    }
+    NSMutableArray *bits = [NSMutableArray array];
+    for (NSDictionary *d in held)
+        [bits addObject:[NSString stringWithFormat:@"색%@/k%@/'%@'x%@", d[@"type"], d[@"hkind"], d[@"kindName"], d[@"balls"]]];
+    PKLOGC(@"sel.miss", ([NSString stringWithFormat:@"[feed] 고른 정수(색%d k%d '%@')를 보유목록에서 못 찾음. 보유: %@",
+           color, hkind, fkind ?: @"", [bits componentsJoinedByString:@" "]]));
+}
 static void pkRememberSpecial(void *itemIdStr) {
     NSString *fed = pkStr(itemIdStr);
     if (!fed.length) return;
     for (NSDictionary *d in pkNectar()) {
         if (![pkStr([d[@"id"] pointerValue]) isEqualToString:fed]) continue;
-        NSUserDefaults *u = [NSUserDefaults standardUserDefaults];
-        if ([d[@"special"] boolValue]) {
-            NSString *kind = [d[@"kindName"] length] ? d[@"kindName"] : [d[@"hkind"] stringValue];
-            if (![[u stringForKey:@"pa_special"] isEqualToString:kind]) {
-                [u setObject:kind forKey:@"pa_special"];
-                PALOG(@"[feed] 특수정수 지정됨: %@ (손으로 준 것을 기억)", kind);
-            }
-        } else if ([u stringForKey:@"pa_special"]) {
-            [u removeObjectForKey:@"pa_special"];
-            PALOG(@"[feed] 특수정수 지정 해제 (일반 정수를 손으로 줌)");
-        }
+        pkPinNectar(fed, [d[@"special"] boolValue], d[@"kindName"],
+                    [d[@"hkind"] intValue], [d[@"type"] intValue], @"손으로 줌");
         return;
     }
 }
@@ -1369,6 +1511,7 @@ static NSString *expeditionPass(void) {
 // seconds. Feeding 39 Pikmin used to take five minutes of passes.
 static NSString *feedPass(void) {
     if (!gMgr || !gRpc) return @"게임/서버 준비 대기";
+    pkPinFromCurrentSelection();          // whatever is picked right now
     NSArray *nectar = pkNectar();
     NSMutableArray *plain = [NSMutableArray array], *special = [NSMutableArray array];
     long long totPlain = 0, totSpecial = 0;
@@ -1384,16 +1527,17 @@ static NSString *feedPass(void) {
     // UI only — it is in neither the server prefs nor a stored key — so the
     // kind we hold most of is the default, and pa_special (a flowerKind name
     // or a honeyFlowerKind number) pins it to the one the user wants.
-    NSString *want = [[NSUserDefaults standardUserDefaults] stringForKey:@"pa_special"];
-    if (want.length) {
-        for (NSDictionary *d in special) {
-            if ([d[@"kindName"] caseInsensitiveCompare:want] == NSOrderedSame ||
-                [[d[@"hkind"] stringValue] isEqualToString:want]) {
-                [special removeObject:d];
-                [special insertObject:d atIndex:0];
-                break;
-            }
-        }
+    NSUserDefaults *u = [NSUserDefaults standardUserDefaults];
+    NSString *wantId = [u stringForKey:@"pa_special_id"];
+    NSString *want   = [u stringForKey:@"pa_special"];
+    // The exact stack the user picked wins — that carries the colour too —
+    // and its kind is the fallback once that stack runs out.
+    for (NSDictionary *d in [special copy]) {
+        BOOL hit = wantId.length && [pkStr([d[@"id"] pointerValue]) isEqualToString:wantId];
+        if (!hit && want.length && !wantId.length)
+            hit = [d[@"kindName"] caseInsensitiveCompare:want] == NSOrderedSame ||
+                  [[d[@"hkind"] stringValue] isEqualToString:want];
+        if (hit) { [special removeObject:d]; [special insertObject:d atIndex:0]; break; }
     }
     // What is actually on hand, so the right one can be named.
     if (special.count) {
