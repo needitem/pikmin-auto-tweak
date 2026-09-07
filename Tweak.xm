@@ -313,14 +313,30 @@ static void *hook_seedsend2(void *self, void *req, void *ct, int retry, void *mi
 // (string pikminId, string itemId). When the user feeds manually, this logs the
 // exact itemId that works and captures the manager instance for us to reuse.
 static void *gAction = NULL;                      // PikminActionManager
+// The hotbar choice lives in the game's UI and nowhere else — not in the
+// server prefs, not in the 137 keys of its own preferences file — so it
+// cannot be read. What can be observed is the user actually giving a nectar
+// by hand: this is the game's own feed path, which we never call ourselves,
+// so the itemId passing through it is exactly the one they picked. Remember
+// its flower kind and the automation spends that one from then on.
+static void pkRememberSpecial(void *itemIdStr);
 static void *(*orig_schedfeed)(void*, void*, void*, void*);
 static void *hook_schedfeed(void *self, void *pikId, void *itemId, void *mi) {
     if (self) gAction = self;
     PALOG(@"[schedFeed] pik='%@' item='%@'", pkStr(pikId) ?: @"", pkStr(itemId) ?: @"");
+    pkRememberSpecial(itemId);
     return orig_schedfeed(self, pikId, itemId, mi);
 }
 // Manual harvest goes through the same PikminActionManager, so hooking it arms
 // gAction too — the user harvests normally and the feed path becomes available.
+// Zenject builds this one; hooking its constructor hands us the instance at
+// startup instead of waiting for the user to feed or harvest by hand, which
+// is why the game's own harvest path used to sit unused for a whole session.
+static void (*orig_pamctor)(void*, void*);
+static void hook_pamctor(void *self, void *mi) {
+    if (self && !gAction) { gAction = self; PALOG(@"[capture] PikminActionManager=%p (ctor)", self); }
+    orig_pamctor(self, mi);
+}
 static bool (*orig_schedpick)(void*, void*, void*);
 static bool hook_schedpick(void *self, void *pikId, void *mi) {
     if (self && !gAction) { gAction = self; PALOG(@"[capture] PikminActionManager=%p (pick)", self); }
@@ -421,6 +437,8 @@ static void pkInstallHooks(void) {
     void *actCls = pkFindClass("Niantic.Ichigo.Game", "PikminActionManager");
     void *mSchF = actCls ? f_class_get_method_from_name(actCls, "ScheduleFeedPikminAsync", 2) : NULL;
     if (mSchF) { void *fp = *(void**)mSchF; if (fp) f_MSHookFunction(fp, (void*)hook_schedfeed, (void**)&orig_schedfeed); }
+    void *mPamC = actCls ? f_class_get_method_from_name(actCls, ".ctor", 0) : NULL;
+    if (mPamC) { void *fp = *(void**)mPamC; if (fp) f_MSHookFunction(fp, (void*)hook_pamctor, (void**)&orig_pamctor); }
     void *mSchP = actCls ? f_class_get_method_from_name(actCls, "SchedulePickPikminFlowerBatchedRequest", 1) : NULL;
     if (mSchP) { void *fp = *(void**)mSchP; if (fp) f_MSHookFunction(fp, (void*)hook_schedpick, (void**)&orig_schedpick); }
     // PikminInventoryTools — reached for the game's own min-troop setting.
@@ -442,7 +460,7 @@ static void pkInstallHooks(void) {
     void *momCls = pkFindClass("Niantic.Ichigo.Game.MapObjects", "MapObjectManager");
     void *mMU = momCls ? f_class_get_method_from_name(momCls, "Update", 0) : NULL;
     if (mMU) { void *fp = *(void**)mMU; if (fp) f_MSHookFunction(fp, (void*)hook_mapupd, (void**)&orig_mapupd); }
-    PALOG(@"[hooks] fpcCls=%p mPI=%p momCls=%p mMU=%p", fpcCls, mPI, momCls, mMU);
+    PALOG(@"[hooks] fpcCls=%p mPI=%p momCls=%p mMU=%p actCls=%p ctor=%p", fpcCls, mPI, momCls, mMU, actCls, mPamC);
     PALOG(@"[hooks] edsCls=%p mEA=%p mEU=%p", edsCls, mEA, mEU);
     PALOG(@"[hooks] mFS=%p mFS2=%p mPS=%p mPS2=%p mSchF=%p mSchP=%p", mFS, mFS2, mPS, mPS2, mSchF, mSchP);
     installed = (mGP || mAU || mGK) != 0;
@@ -645,10 +663,19 @@ static NSArray *pkSquad(void) {
         if (!proto) continue;
         void *idStr = *(void**)((char*)proto + 0x28);
         if (!idStr) continue;
+        // numFlowers_ @0x38 is the lifetime count of flowers this Pikmin has
+        // bloomed, not what it is holding — using it as "has petals" sent a
+        // harvest request for every Pikmin in the squad, every time, and the
+        // server ignored the lot. What can be picked right now is
+        // flowerStateFlowerCount_ @0x58, plus wiltedCount_ @0x5C once the
+        // flower has wilted.
         int state = *(int*)((char*)proto + 0x48);       // PikminProto.flowerState_
-        int nflw  = *(int*)((char*)proto + 0x38);       // numFlowers_
+        int nflw  = *(int*)((char*)proto + 0x38);       // numFlowers_ (lifetime)
+        int cnt   = *(int*)((char*)proto + 0x58);       // flowerStateFlowerCount_
+        int wilt  = *(int*)((char*)proto + 0x5C);       // wiltedCount_
         [out addObject:@{ @"id": [NSValue valueWithPointer:idStr],
-                          @"state": @(state), @"nflw": @(nflw) }];
+                          @"state": @(state), @"nflw": @(nflw),
+                          @"cnt": @(cnt), @"wilt": @(wilt) }];
     }
     return out;
 }
@@ -730,6 +757,29 @@ static NSArray *pkNectar(void) {
     return out;
 }
 
+// Match a fed itemId against the nectar we hold and pin its kind as the one
+// to spend on buds. A plain colour nectar clears the pin instead, so handing
+// out an ordinary one says "no particular flower".
+static void pkRememberSpecial(void *itemIdStr) {
+    NSString *fed = pkStr(itemIdStr);
+    if (!fed.length) return;
+    for (NSDictionary *d in pkNectar()) {
+        if (![pkStr([d[@"id"] pointerValue]) isEqualToString:fed]) continue;
+        NSUserDefaults *u = [NSUserDefaults standardUserDefaults];
+        if ([d[@"special"] boolValue]) {
+            NSString *kind = [d[@"kindName"] length] ? d[@"kindName"] : [d[@"hkind"] stringValue];
+            if (![[u stringForKey:@"pa_special"] isEqualToString:kind]) {
+                [u setObject:kind forKey:@"pa_special"];
+                PALOG(@"[feed] 특수정수 지정됨: %@ (손으로 준 것을 기억)", kind);
+            }
+        } else if ([u stringForKey:@"pa_special"]) {
+            [u removeObjectForKey:@"pa_special"];
+            PALOG(@"[feed] 특수정수 지정 해제 (일반 정수를 손으로 줌)");
+        }
+        return;
+    }
+}
+
 // Feed one nectar kind to MANY Pikmin in a single FeedPikmins RPC — the request's
 // pikminId_ is a repeated field, so the whole roster is fed in parallel in one
 // call (no per-Pikmin camera focus, no burst of requests).
@@ -798,35 +848,47 @@ static void autoNumberPass(void) {
 // ---------- feature: harvest flowers (all owned pikmin) ----------
 static NSString *harvestPass(void) {
     if (!gMgr || !gRpc) return @"게임/서버 준비 대기";
-    // Only deployed (squad) Pikmin grow flowers to pick, so target just those.
-    // Only Pikmin actually holding petals; asking the other thirty every
-    // minute was the bulk of this pass's work and picked nothing.
+    // Only Pikmin whose petals have actually fallen — wiltedCount_ above zero,
+    // or the explicit FLOWER_READY_TO_PICK state. Sending the whole squad in
+    // one request, most of them with flowers still growing, got the entire
+    // batch ignored: 45 ids went out every minute and not one petal arrived.
     NSMutableArray *ids = [NSMutableArray array];
-    NSUInteger squadN = 0;
+    NSUInteger squadN = 0, growing = 0;
+    long long pickable = 0;
     for (NSDictionary *p in pkSquad()) {
         squadN++;
-        if ([p[@"nflw"] intValue] > 0 || [p[@"state"] intValue] == PK_PF_PICK) [ids addObject:p[@"id"]];
+        int st = [p[@"state"] intValue], wilt = [p[@"wilt"] intValue];
+        if (wilt > 0 || st == PK_PF_PICK) { [ids addObject:p[@"id"]]; pickable += wilt; }
+        else growing++;
     }
     if (!squadN) return @"🌸 대열에 피크민 없음";
-    if (!ids.count) return @"🌸 딸 꽃잎 없음";
-    // Prefer the game's OWN harvest path: PikminActionManager.SchedulePickPikminFlower-
-    // BatchedRequest(pikminId). The raw PickPikminFlowers RPC was silently rejected
-    // (flowers never emptied), same as feed — the game method takes the right id
-    // form and batches, so it actually picks.
+    if (!ids.count) return [NSString stringWithFormat:@"🌸 딸 꽃잎 없음 (자라는 중 %lu)", (unsigned long)growing];
+
+    // The game's own path when we have it — it batches and keeps the client's
+    // prediction bookkeeping straight.
     if (gAction) {
         void *m = pkMethod(f_object_get_class(gAction), "SchedulePickPikminFlowerBatchedRequest", 1);
         if (m) {
-            int n = 0;
-            for (NSValue *v in ids) { void *pid = [v pointerValue]; void *a[1] = { pid }; if (pkInvoke(m, gAction, a)) n++; (void)n; }
-            return [NSString stringWithFormat:@"🌸 수확 %lu마리 (대열 %lu)", (unsigned long)ids.count, (unsigned long)squadN];
+            for (NSValue *v in ids) { void *pid = [v pointerValue]; void *a[1] = { pid }; pkInvoke(m, gAction, a); }
+            return [NSString stringWithFormat:@"🌸 수확(게임경로) %lu마리 / 꽃잎 %lld", (unsigned long)ids.count, pickable];
         }
     }
-    void *cls = NULL;
-    void *req = pkNewReq("PickPikminFlowersRequestProto", &cls);
-    if (!req) return @"수확 요청 생성 실패";
-    for (NSValue *v in ids) { void *idStr = [v pointerValue]; if (idStr) pkAddPikminId(req, cls, idStr); }
-    BOOL ok = pkSendRpc("SendPickPikminFlowersRpcForResultAsync", req);
-    return ok ? [NSString stringWithFormat:@"🌸 수확(RPC) %lu마리 — gAction 미포착", (unsigned long)ids.count] : @"🌸 수확 전송 실패";
+    // Otherwise the plain RPC — the variant the game's own batched harvest
+    // awaits — five ids at a time, as feeding does.
+    int sent = 0;
+    for (NSUInteger i = 0; i < ids.count; i += 5) {
+        NSRange r = NSMakeRange(i, MIN((NSUInteger)5, ids.count - i));
+        void *cls = NULL;
+        void *req = pkNewReq("PickPikminFlowersRequestProto", &cls);
+        if (!req) break;
+        for (NSValue *v in [ids subarrayWithRange:r]) {
+            void *idStr = [v pointerValue];
+            if (idStr) pkAddPikminId(req, cls, idStr);
+        }
+        if (pkSendRpc("SendPickPikminFlowersRpcAsync", req)) sent += (int)r.length;
+    }
+    return sent ? [NSString stringWithFormat:@"🌸 수확 %d마리 / 꽃잎 %lld (자라는 중 %lu)", sent, pickable, (unsigned long)growing]
+                : @"🌸 수확 전송 실패";
 }
 
 // ---------- feature: 수집 — take what the Pikmin are carrying ----------
@@ -1347,10 +1409,26 @@ static NSString *feedPass(void) {
 
     NSArray *squad = pkSquad();
     if (!squad.count) return @"🍯 대열에 피크민 없음 (배치/출격 필요)";
+    // What the squad's heads are actually doing. Feeding and harvesting both
+    // depend on it, and guessing was getting us nowhere: only
+    // FLOWER_READY_TO_PICK can be picked, and a flower already at its full
+    // petal count takes no more nectar.
+    {
+        int byState[8] = {0}; long long petals = 0;
+        for (NSDictionary *p in squad) {
+            int st = [p[@"state"] intValue];
+            if (st >= 0 && st < 8) byState[st]++;
+            petals += [p[@"cnt"] intValue] + [p[@"wilt"] intValue];
+        }
+        PKLOGC(@"feed.census", ([NSString stringWithFormat:
+            @"[feed] 대열 %lu: 잎%d 봉오리%d 꽃%d 수확가능%d 시듦%d 기타%d / 지금 딸 수 있는 꽃잎 %lld",
+            (unsigned long)squad.count, byState[PK_PF_LEAF], byState[PK_PF_BUD], byState[PK_PF_FLOWER],
+            byState[PK_PF_PICK], byState[PK_PF_WILTED], byState[0] + byState[2] + byState[7], petals]));
+    }
     NSMutableArray *budIds = [NSMutableArray array], *flowerIds = [NSMutableArray array];
     for (NSDictionary *p in squad) {
         int st = [p[@"state"] intValue];
-        if (st == PK_PF_PICK) continue;                 // harvest first, then feed
+        if (st == PK_PF_PICK || st == PK_PF_WILTED) continue;   // pick these first
         if (st == PK_PF_LEAF || st == PK_PF_BUD) [budIds addObject:p[@"id"]];
         else [flowerIds addObject:p[@"id"]];
     }
