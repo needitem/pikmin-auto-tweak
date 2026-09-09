@@ -2262,9 +2262,10 @@ static NSString *troopFillPass(void) {
         if ([d[@"st"] intValue] == PK_STATUS_TASK) continue;  // busy on a task — cannot move
         [elig addObject:d];                                    // 데코 포함 — 우선순위로 처리
     }
-    // 재배치 우선순위 티어(낮을수록 먼저): asset≥2=데코, hearts=numHearts_(0~5)
+    // 재배치 우선순위 티어(낮을수록 먼저): asset≥2=데코,
+    //   hearts=numHearts_ 0~8 (0~4=빨강하트 4칸, 4~8=노랑하트 4칸/만렙8). 4.0=빨강최대=경계.
     //   1) 데코 · 하트 ≤4   2) 일반 · 하트 ≤4   3) 데코 · 하트 ≥4   4) 일반 · 나머지(하트 ≥3 포함)
-    // 성장 여지 큰(하트 낮은) 데코를 최우선으로 부대에 유지.
+    // 성장 여지 큰(하트 낮은=빨강 단계) 데코를 최우선으로 부대에 유지.
     int (^pkTier)(NSDictionary *) = ^int(NSDictionary *d) {
         BOOL deco = [d[@"asset"] intValue] >= 2;
         float h = [d[@"hearts"] floatValue];
