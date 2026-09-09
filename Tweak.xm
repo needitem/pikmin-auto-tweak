@@ -1320,8 +1320,9 @@ static NSArray *pkExpeditionCandidatesUncachedList(void) {
         if (pi) nPI++;
         if (ip) nIP++;
         if (st == PK_STATUS_ENTOURAGE) nEnt++;
+        float h = 0; { void *fr = proto ? *(void**)((char*)proto + 0xB0) : NULL; if (fr) h = *(float*)((char*)fr + 0x1C); }
         NSMutableDictionary *e = [d mutableCopy];
-        e[@"troopPI"] = @(pi); e[@"troopIP"] = @(ip);
+        e[@"troopPI"] = @(pi); e[@"troopIP"] = @(ip); e[@"hearts"] = @(h);
         [pool addObject:e];
     }
     // Whichever tally lands closest to the game's own troop count wins.
@@ -1336,11 +1337,16 @@ static NSArray *pkExpeditionCandidatesUncachedList(void) {
     int minTroop = pkMinTroop();
     int need = poolInTroop - troopTotal + minTroop;
     NSMutableArray *out = [NSMutableArray array];
+    NSMutableArray *grown = [NSMutableArray array];         // 하트 ≥4 (육성 완료 — 탐험용)
     int held = 0;
     for (NSDictionary *d in pool) {
         if (need > 0 && held < need && [d[@"troop"] boolValue]) { held++; continue; }
         [out addObject:d];
+        if ([d[@"hearts"] floatValue] >= 4.0f) [grown addObject:d];
     }
+    // 하트 4 미만은 부대에서 육성 중 → 탐험엔 하트 ≥4만 보냄(부대-탐험 경합·churn 제거).
+    // ≥4가 하나도 없을 때만 전체 사용(탐험 완전정지 방지).
+    if (grown.count) out = grown;
 
     if (!out.count) {
         NSMutableArray *bits = [NSMutableArray array];
