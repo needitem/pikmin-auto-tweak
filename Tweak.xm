@@ -2195,8 +2195,9 @@ static NSString *seedPass(void) {
 }
 
 // ---------- feature: 부대 채우기 (동행 자동 편성) ----------
-// Fill the active troop up to its max with NON-decor Pikmin, highest friendship
-// first — decor Pikmin are kept out for the separate event squad. The troop is
+// Fill the active troop up to its max by a 4-tier priority (데코 우선, 성장 여지 순):
+//   1) 데코·하트≤4  2) 일반·하트≤4  3) 데코·하트≥4  4) 일반·나머지 — see pkTier below.
+// Decor Pikmin ARE now placed in the walking troop (tiers 1/3). The troop is
 // the subset that walks with you, gains friendship, is fed and fights; its cap is
 // PikminUtils.GetPikminInTroopCountMax (level-based). Members are moved in with
 // ArrangePikminTroopRequestProto.moveToTroop (a MoveToTroopProto{pikminId} each).
@@ -2258,12 +2259,24 @@ static NSString *troopFillPass(void) {
     NSMutableArray *elig = [NSMutableArray array];
     for (NSDictionary *d in pool) {
         if ([d[@"idp"] isKindOfClass:[NSNull class]]) continue;
-        if ([d[@"asset"] intValue] >= 2) continue;            // decor — never in the walking troop
         if ([d[@"st"] intValue] == PK_STATUS_TASK) continue;  // busy on a task — cannot move
-        [elig addObject:d];
+        [elig addObject:d];                                    // 데코 포함 — 우선순위로 처리
     }
+    // 재배치 우선순위 티어(낮을수록 먼저): asset≥2=데코, hearts=numHearts_(0~5)
+    //   1) 데코 · 하트 ≤4   2) 일반 · 하트 ≤4   3) 데코 · 하트 ≥4   4) 일반 · 나머지(하트 ≥3 포함)
+    // 성장 여지 큰(하트 낮은) 데코를 최우선으로 부대에 유지.
+    int (^pkTier)(NSDictionary *) = ^int(NSDictionary *d) {
+        BOOL deco = [d[@"asset"] intValue] >= 2;
+        float h = [d[@"hearts"] floatValue];
+        if (deco  && h <= 4.0f) return 1;
+        if (!deco && h <= 4.0f) return 2;
+        if (deco  && h >= 4.0f) return 3;
+        return 4;                                              // 일반 · 하트 >4
+    };
     [elig sortUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) {
-        return [b[@"hearts"] compare:a[@"hearts"]];           // highest friendship first
+        int ta = pkTier(a), tb = pkTier(b);
+        if (ta != tb) return ta < tb ? NSOrderedAscending : NSOrderedDescending;  // 낮은 티어 먼저
+        return [a[@"hearts"] compare:b[@"hearts"]];            // 같은 티어: 하트 적은 순(성장 우선)
     }];
     NSMutableSet<NSString *> *wantIds = [NSMutableSet set];
     NSMutableArray *want = [NSMutableArray array];
@@ -2299,7 +2312,7 @@ static NSString *troopFillPass(void) {
     }
 
     if (!out.count && !in.count)
-        return [NSString stringWithFormat:@"부대 %d/%d — 이미 최적(비데코·친밀도순)", troopCnt, troopMax];
+        return [NSString stringWithFormat:@"부대 %d/%d — 이미 최적(데코 우선 4티어)", troopCnt, troopMax];
 
     void *reqCls = NULL;
     void *req = pkNewReq("ArrangePikminTroopRequestProto", &reqCls);
