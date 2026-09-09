@@ -2275,7 +2275,7 @@ static NSString *troopFillPass(void) {
     [elig sortUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) {
         int ta = pkTier(a), tb = pkTier(b);
         if (ta != tb) return ta < tb ? NSOrderedAscending : NSOrderedDescending;  // 낮은 티어 먼저
-        return [a[@"hearts"] compare:b[@"hearts"]];            // 같은 티어: 하트 적은 순(육성 우선)
+        return [b[@"hearts"] compare:a[@"hearts"]];            // 같은 티어: 하트 높은 순(4에 가까운 애부터 끝내 슬롯 회전)
     }];
     NSMutableSet<NSString *> *wantIds = [NSMutableSet set];
     NSMutableArray *want = [NSMutableArray array];
