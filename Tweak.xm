@@ -2195,8 +2195,8 @@ static NSString *seedPass(void) {
 }
 
 // ---------- feature: 부대 채우기 (동행 자동 편성) ----------
-// Fill the active troop up to its max by a 4-tier priority (데코 우선, 성장 여지 순):
-//   1) 데코·하트≤4  2) 일반·하트≤4  3) 데코·하트≥4  4) 일반·나머지 — see pkTier below.
+// Fill the active troop up to its max by a 4-tier priority — 기준 하트 4(빨강 최대),
+// 목표는 모든 피크민을 4로 육성: 1) 데코·4미만  2) 일반·4미만  3) 데코·4이상  4) 일반·4이상.
 // Decor Pikmin ARE now placed in the walking troop (tiers 1/3). The troop is
 // the subset that walks with you, gains friendship, is fed and fights; its cap is
 // PikminUtils.GetPikminInTroopCountMax (level-based). Members are moved in with
@@ -2262,22 +2262,20 @@ static NSString *troopFillPass(void) {
         if ([d[@"st"] intValue] == PK_STATUS_TASK) continue;  // busy on a task — cannot move
         [elig addObject:d];                                    // 데코 포함 — 우선순위로 처리
     }
-    // 재배치 우선순위 티어(낮을수록 먼저): asset≥2=데코,
-    //   hearts=numHearts_ 0~8 (0~4=빨강하트 4칸, 4~8=노랑하트 4칸/만렙8). 4.0=빨강최대=경계.
-    //   1) 데코 · 하트 ≤4   2) 일반 · 하트 ≤4   3) 데코 · 하트 ≥4   4) 일반 · 나머지(하트 ≥3 포함)
-    // 성장 여지 큰(하트 낮은=빨강 단계) 데코를 최우선으로 부대에 유지.
+    // 재배치 우선순위 — 기준은 무조건 하트 4(=빨강 최대). 목표: 모든 피크민을 4로 육성.
+    //   hearts=numHearts_ 0~8 (0~4=빨강 4칸, 4~8=노랑 4칸/만렙8). asset≥2=데코.
+    //   1) 데코 · 4 미만   2) 일반 · 4 미만   3) 데코 · 4 이상   4) 일반 · 4 이상
+    // 4 미만(아직 육성 필요)을 먼저, 그 안에서도 데코 먼저. 4 이상은 이미 달성이라 후순위.
     int (^pkTier)(NSDictionary *) = ^int(NSDictionary *d) {
         BOOL deco = [d[@"asset"] intValue] >= 2;
         float h = [d[@"hearts"] floatValue];
-        if (deco  && h <= 4.0f) return 1;
-        if (!deco && h <= 4.0f) return 2;
-        if (deco  && h >= 4.0f) return 3;
-        return 4;                                              // 일반 · 하트 >4
+        if (h < 4.0f) return deco ? 1 : 2;                     // 4 미만: 데코 먼저
+        return deco ? 3 : 4;                                   // 4 이상(달성): 데코 먼저
     };
     [elig sortUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) {
         int ta = pkTier(a), tb = pkTier(b);
         if (ta != tb) return ta < tb ? NSOrderedAscending : NSOrderedDescending;  // 낮은 티어 먼저
-        return [a[@"hearts"] compare:b[@"hearts"]];            // 같은 티어: 하트 적은 순(성장 우선)
+        return [a[@"hearts"] compare:b[@"hearts"]];            // 같은 티어: 하트 적은 순(육성 우선)
     }];
     NSMutableSet<NSString *> *wantIds = [NSMutableSet set];
     NSMutableArray *want = [NSMutableArray array];
