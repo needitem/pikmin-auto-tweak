@@ -737,9 +737,15 @@ static NSArray *pkSquad(void) {
         int nflw  = *(int*)((char*)proto + 0x38);       // numFlowers_ (lifetime)
         int cnt   = *(int*)((char*)proto + 0x58);       // flowerStateFlowerCount_
         int wilt  = *(int*)((char*)proto + 0x5C);       // wiltedCount_
+        // 현재 핀 꽃 = bloomingFlower_ @0x78 (FlowerProto). color_ @0x18, flowerKind_ @0x1C
+        // → 이 꽃을 수확하면 채워질 꽃잎 재고 버킷 (색,종류) 키.
+        void *bloom = *(void**)((char*)proto + 0x78);
+        int fcolor = bloom ? *(int*)((char*)bloom + 0x18) : 0;
+        int fkind  = bloom ? *(int*)((char*)bloom + 0x1C) : 0;
         [out addObject:@{ @"id": [NSValue valueWithPointer:idStr],
                           @"state": @(state), @"nflw": @(nflw),
-                          @"cnt": @(cnt), @"wilt": @(wilt) }];
+                          @"cnt": @(cnt), @"wilt": @(wilt),
+                          @"fcolor": @(fcolor), @"fkind": @(fkind), @"hasBloom": @(bloom != NULL) }];
     }
     return out;
 }
@@ -1245,6 +1251,34 @@ static int pkMinTroop(void) {
     return v > 0 ? v : 1;
 }
 
+// 꽃잎 재고 상한(각 (색,종류) 버킷 공통). 게임 제공값:
+//   InventoryManager.itemCapacityInventoryItemStorage @0x158 → Items @0x10 (List<Predicted>)
+//   → 첫 항목.get_Proto() = ItemCapacityProto → petal_ @0x28 = CapacityProto
+//   → currentCount_ @0x18 (기본상한) + purchasedCount_ @0x1C (구매확장).
+static NSArray *pkPetals(void);   // 정의는 심기 파트(아래)
+static int pkPetalCapacity(void) {
+    void *inv = gInv();
+    if (!inv || !resolveAPI()) return -1;
+    void *storage = *(void**)((char*)inv + 0x158);
+    if (!storage) return -1;
+    void *items = *(void**)((char*)storage + 0x10);
+    if (!items) return -1;
+    int size = *(int*)((char*)items + 0x18);
+    void *arr = *(void**)((char*)items + 0x10);
+    if (!arr || size <= 0) return -1;
+    void *pred = *(void**)((char*)arr + 0x20);               // 첫 원소
+    if (!pred) return -1;
+    void *conf = *(void**)((char*)pred + 0x10), *prd = *(void**)((char*)pred + 0x18);
+    void *item = conf ? conf : prd;
+    if (!item) return -1;
+    void *proto = pkInvoke(pkMethod(f_object_get_class(item), "get_Proto", 0), item, NULL);
+    if (!proto) return -1;
+    void *pc = *(void**)((char*)proto + 0x28);               // petal_ (CapacityProto)
+    if (!pc) return -1;
+    int cur = *(int*)((char*)pc + 0x18), pur = *(int*)((char*)pc + 0x1C);
+    return cur + pur;
+}
+
 // Candidate Pikmin for an expedition, decided the way the game decides it.
 //
 // The old rule excluded every troop member outright, which emptied the list on a
@@ -1575,13 +1609,30 @@ static NSString *feedPass(void) {
             (unsigned long)squad.count, byState[PK_PF_LEAF], byState[PK_PF_BUD], byState[PK_PF_FLOWER],
             byState[PK_PF_PICK], byState[PK_PF_WILTED], byState[0] + byState[2] + byState[7], petals]));
     }
+    // 꽃잎 재고가 이미 상한인 (색,종류) 버킷 → 그 꽃 피우는 정수는 낭비(수확해도 넘침) → 제외.
+    int petalCap = pkPetalCapacity();
+    NSMutableSet<NSString *> *cappedBuckets = [NSMutableSet set];
+    if (petalCap > 0) {
+        for (NSDictionary *p in pkPetals())
+            if ([p[@"num"] intValue] >= petalCap)
+                [cappedBuckets addObject:[NSString stringWithFormat:@"%@_%@", p[@"color"], p[@"kind"]]];
+    }
     NSMutableArray *budIds = [NSMutableArray array], *flowerIds = [NSMutableArray array];
+    int nCapped = 0;
     for (NSDictionary *p in squad) {
         int st = [p[@"state"] intValue];
         if (st == PK_PF_PICK || st == PK_PF_WILTED) continue;   // pick these first
+        // 이미 핀 꽃의 재고 버킷이 상한이면 정수 안 줌(봉오리/잎은 버킷 미정이라 그대로 개화)
+        if (cappedBuckets.count && [p[@"hasBloom"] boolValue]) {
+            NSString *bk = [NSString stringWithFormat:@"%@_%@", p[@"fcolor"], p[@"fkind"]];
+            if ([cappedBuckets containsObject:bk]) { nCapped++; continue; }
+        }
         if (st == PK_PF_LEAF || st == PK_PF_BUD) [budIds addObject:p[@"id"]];
         else [flowerIds addObject:p[@"id"]];
     }
+    PKLOGC(@"feed.petalcap", ([NSString stringWithFormat:@"[feed] 꽃잎상한 %d · 꽉찬 버킷 %lu개 · 상한제외 %d마리 (먹일 봉오리 %lu · 꽃 %lu)",
+           petalCap, (unsigned long)cappedBuckets.count, nCapped,
+           (unsigned long)budIds.count, (unsigned long)flowerIds.count]));
 
     // Five ids per request, as the game does.
     int (^feedGroup)(NSArray *, NSDictionary *) = ^int(NSArray *ids, NSDictionary *kind) {
