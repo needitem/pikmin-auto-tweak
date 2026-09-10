@@ -1648,7 +1648,18 @@ static NSString *feedPass(void) {
         return done;
     };
 
-    int fedBud = feedGroup(budIds, special.firstObject ?: plain.firstObject);
+    // 봉오리/잎: 특수정수로 새 꽃 개화 → 그 특수정수가 낼 (색,종류) 버킷이 상한이면 생략.
+    // (type=honeyType=색, hkind=honeyFlowerKind=종류 → 꽃잎 재고 버킷 키와 동일)
+    NSDictionary *budNectar = special.firstObject ?: plain.firstObject;
+    if (budNectar && [budNectar[@"special"] boolValue] && cappedBuckets.count) {
+        NSString *bk = [NSString stringWithFormat:@"%@_%@", budNectar[@"type"], budNectar[@"hkind"]];
+        if ([cappedBuckets containsObject:bk]) {
+            PKLOGC(@"feed.budcap", ([NSString stringWithFormat:@"[feed] 특수정수 %@(색%@ k%@) 버킷 상한 → 봉오리 %lu마리 급식 생략",
+                   budNectar[@"kindName"], budNectar[@"type"], budNectar[@"hkind"], (unsigned long)budIds.count]));
+            budNectar = nil;
+        }
+    }
+    int fedBud = feedGroup(budIds, budNectar);
     int fedFlower = feedGroup(flowerIds, plain.firstObject);
     NSDictionary *sp = special.firstObject;
     return [NSString stringWithFormat:@"🍯 봉오리/잎 %d마리%@ · 꽃 %d마리(일반) / 일반 %lld 특수 %lld",
