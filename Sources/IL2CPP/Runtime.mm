@@ -69,8 +69,12 @@ void *pkRawFieldOffsetByName(void *cls, const char *name, ptrdiff_t *off) {
     return fld;
 }
 
+static volatile BOOL gArmed = NO;
+void pkRuntimeArm(void) { gArmed = YES; }
+
 BOOL pkRuntimeReady(void) {
     static BOOL done = NO;
+    if (!gArmed) return NO;
     if (done) return YES;
     if (!gUnity) {
         NSString *fw = [[[NSBundle mainBundle] bundlePath]

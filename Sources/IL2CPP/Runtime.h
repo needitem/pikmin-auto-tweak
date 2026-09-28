@@ -21,7 +21,12 @@ typedef struct PKField {
 #define PKF(n, a, fb) { n, a, fb, -2 }
 
 // ---- runtime ----
-BOOL pkRuntimeReady(void);   // resolves the API once; false until Unity is loaded
+// Nothing here touches il2cpp until the app arms the bridge (the game has
+// created its scene, so Unity has finished initialising). Every il2cpp call
+// path goes through pkRuntimeReady(), so this one gate covers them all; before
+// it opens, il2cpp calls crash (a null deref inside UnityFramework at launch).
+void pkRuntimeArm(void);
+BOOL pkRuntimeReady(void);   // resolves the API once; false until armed and Unity is loaded
 
 void *pkClass(const char *ns, const char *name);                 // cached
 void *pkClassOf(void *obj);
