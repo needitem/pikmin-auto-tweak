@@ -4,6 +4,7 @@
 #import "Frame.h"
 #import "Inventory.h"
 #import "Layout.h"
+#import "Log.h"
 #import "Nectar.h"
 
 @implementation PKPetal
@@ -55,7 +56,13 @@ static int scanCapacity(void) {
         void *item = pkGetPtr(pred, &F_Pred_conf) ?: pkGetPtr(pred, &F_Pred_pred);
         void *proto = item ? pkItemProto(item) : NULL;
         void *pc = pkGetPtr(proto, &F_Cap_petal);
-        if (pc) cap = pkGetInt(pc, &F_Cap_cur) + pkGetInt(pc, &F_Cap_pur);
+        if (!pc) return;
+        int cur = pkGetInt(pc, &F_Cap_cur), pur = pkGetInt(pc, &F_Cap_pur);
+        // Stacks stop at exactly currentCount_ (six different stacks sit at 400
+        // while currentCount_ + purchasedCount_ reads 500), so purchasedCount_ is
+        // not extra room per stack: the cap is currentCount_ alone.
+        cap = cur > 0 ? cur : cur + pur;
+        PKLOGC(@"petal.cap", ([NSString stringWithFormat:@"[꽃잎상한] currentCount_=%d purchasedCount_=%d → 상한 %d", cur, pur, cap]));
     });
     return cap;
 }
@@ -67,25 +74,22 @@ int pkPetalCapacity(void) {
     return gCapFrame;
 }
 
-static NSString *plainKey(int color) { return [NSString stringWithFormat:@"c%d|", color]; }
-static NSString *namedKey(int color, NSString *name) {
-    return [NSString stringWithFormat:@"c%d|%@", color, name.lowercaseString];
-}
+// A bucket is "petals of this colour and flower kind". Petals and a Pikmin's
+// bloom both carry the game's FlowerKind number (lisianthus is 55 on both), so
+// it is compared as a number; plain (kind 0 or COMMON 5) is normalised to 0.
+// Nectar carries a differently-encoded kind, so it is matched through the
+// flower NAME, looked up in the petals we hold.
+static int normKind(int kind) { return pkNectarIsSpecial(nil, kind) ? kind : 0; }
+static NSString *bucketKey(int color, int kind) { return [NSString stringWithFormat:@"c%d|k%d", color, normKind(kind)]; }
 
-NSString *pkBucketOfPetal(PKPetal *p) {
-    if (p.flowerName.length) return namedKey(p.color, p.flowerName);
-    if (!p.special) return plainKey(p.color);
-    return [NSString stringWithFormat:@"c%d|k%d", p.color, p.kind];   // unnamed special: matches nothing else
-}
+NSString *pkBucketOfPetal(PKPetal *p) { return bucketKey(p.color, p.kind); }
 
 NSString *pkBucketOfNectar(PKNectar *n) {
-    if (n.kindName.length) return namedKey(n.type, n.kindName);
-    return n.special ? nil : plainKey(n.type);
+    if (!n.special) return bucketKey(n.type, 0);
+    if (!n.kindName.length) return nil;
+    for (PKPetal *p in pkPetalList())                     // same colour and flower name -> its kind number
+        if (p.color == n.type && [p.flowerName caseInsensitiveCompare:n.kindName] == NSOrderedSame) return bucketKey(p.color, p.kind);
+    return nil;                                           // no stack of that flower held: nothing to be capped
 }
 
-// A bloom carries only a kind NUMBER, which is not comparable with a name —
-// so only the plain flower (kind 0 or COMMON) is nameable.
-NSString *pkBucketOfBloom(PKPikmin *p) {
-    if (!p.hasBloom) return nil;
-    return pkNectarIsSpecial(nil, p.bloomKind) ? nil : plainKey(p.bloomColor);
-}
+NSString *pkBucketOfBloom(PKPikmin *p) { return p.hasBloom ? bucketKey(p.bloomColor, p.bloomKind) : nil; }

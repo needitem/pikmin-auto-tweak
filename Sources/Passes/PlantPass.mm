@@ -6,12 +6,27 @@
 #import "Nectar.h"
 #import "Petals.h"
 
-// Keep a planting session running. The game's own FlowerPlantingController
-// starts it exactly as the 심기 button does; from then on the game itself sends
-// PlantFlower as the (spoofed) location moves and stops when petals run out.
+// Keep a planting session running on the plain petal stack we hold the MOST of.
+// The game's own FlowerPlantingController starts it exactly as the 심기 button
+// does; from then on the game itself sends PlantFlower as the (spoofed) location
+// moves and stops when the petals run out.
 //
-// Petal choice: plain petals only (special kinds are kept for decor), and of
-// those the stack we hold the MOST of — the biggest stock is spent first.
+// The choice is re-checked every pass, not only at start: while a session that
+// WE started is running, if another stack has become bigger than the one being
+// planted by at least kSwitchMargin petals, the session is stopped and restarted
+// on the bigger stack. The margin keeps near-equal stacks from making the
+// session flap on and off every petal. A session the player started by hand is
+// left alone (we do not know which petal it is spending).
+//
+// Only plain petals are used (special kinds are kept for decor).
+static const int kSwitchMargin = 10;
+static const NSTimeInterval kStartGap = 60;       // a start that did not go live is not retried every pass
+static const NSTimeInterval kStopGap = 20;        // stop is async; do not repeat it
+static const NSTimeInterval kAdoptGap = 90;       // a session may take a while to go live after the request
+
+static NSString *gPlantingId = nil;               // the stack our running session spends
+static NSTimeInterval gLastStart = -1e9, gLastStop = -1e9;
+
 // Is a planting session live? Asked of the controller's own state, not of a
 // field: `isStarted` only says the controller finished initialising (it is
 // true from launch — reading it made every pass think a session was running,
@@ -26,17 +41,33 @@ static BOOL sessionLive(void *plant, BOOL *known) {
     return planting || starting;
 }
 
+// Most petals first; the id breaks ties so the choice is stable.
+static PKPetal *biggestPlain(NSArray<PKPetal *> *petals) {
+    PKPetal *best = nil;
+    for (PKPetal *p in petals) {
+        if (p.special) continue;
+        if (!best || p.num > best.num || (p.num == best.num && [p.itemId compare:best.itemId] == NSOrderedAscending)) best = p;
+    }
+    return best;
+}
+
+static PKPetal *stackById(NSArray<PKPetal *> *petals, NSString *itemId) {
+    for (PKPetal *p in petals) if ([p.itemId isEqualToString:itemId]) return p;
+    return nil;
+}
+
 NSString *pkPlantPass(void) {
     void *plant = pkPlant();
     if (!plant) return @"심기 컨트롤러 대기 (지도 화면이 뜨면 잡힘)";
     if (!pkRpc() || !pkInv()) return @"서버 준비 대기";
 
     BOOL known = NO;
-    BOOL started = sessionLive(plant, &known);
+    BOOL live = sessionLive(plant, &known);
     if (!known) return @"🌱 세션 상태 getter 없음 — 이중 시작을 막으려 시작 안 함";
     NSArray<PKPetal *> *petals = pkPetalList();
     long long plain = 0, special = 0;
     for (PKPetal *p in petals) (p.special ? special : plain) += p.num;
+    PKPetal *best = biggestPlain(petals);
 
     static NSTimeInterval lastCensus = -1e9;
     if (pkMono() - lastCensus > 300) {                       // what we hold, every 5 min
@@ -46,28 +77,40 @@ NSString *pkPlantPass(void) {
             [bits addObject:[NSString stringWithFormat:@"c%dk%d[%@]x%d%@", p.color, p.kind, p.flowerName, p.num, p.special ? @"*" : @""]];
         PALOG(@"[심기] 꽃잎 재고: %@", [bits componentsJoinedByString:@" "]);
     }
-    if (started) return [NSString stringWithFormat:@"🌱 심는 중 (일반 꽃잎 %lld, 특수 %lld)", plain, special];
-    if (plain <= 0) return [NSString stringWithFormat:@"🌱 일반 꽃잎 없음 (특수 %lld 보존)", special];
 
-    PKPetal *best = nil;
-    for (PKPetal *p in petals) {
-        if (p.special) continue;
-        // Most petals first; the id breaks ties so the choice is stable.
-        if (!best || p.num > best.num || (p.num == best.num && [p.itemId compare:best.itemId] == NSOrderedAscending)) best = p;
+    if (live) {
+        PKPetal *cur = gPlantingId ? stackById(petals, gPlantingId) : nil;
+        if (!gPlantingId)
+            return [NSString stringWithFormat:@"🌱 심는 중 — 직접 시작한 세션이라 그대로 둠 (일반 %lld, 특수 %lld)", plain, special];
+        if (cur && best && ![best.itemId isEqualToString:cur.itemId] && best.num >= cur.num + kSwitchMargin) {
+            if (pkMono() - gLastStop < kStopGap) return @"🌱 전환 대기 (중지 요청 후)";
+            gLastStop = pkMono();
+            BOOL ok = NO;
+            pkInvokeEx(pkMethodOf(plant, "StopPlanting", 0), plant, NULL, &ok);
+            PALOG(@"[심기] 전환: 현재 %@(색%d k%d %d장) → %@(색%d k%d %d장) 차이 %d ≥ %d, 중지 요청 ok=%d",
+                  cur.itemId, cur.color, cur.kind, cur.num, best.itemId, best.color, best.kind, best.num,
+                  best.num - cur.num, kSwitchMargin, ok);
+            return ok ? @"🌱 더 많은 꽃잎으로 전환 — 세션 중지 요청" : @"🌱 세션 중지 실패";
+        }
+        return [NSString stringWithFormat:@"🌱 심는 중 %@ %d장 (최다 %d장, 일반 %lld, 특수 %lld)",
+                cur ? [NSString stringWithFormat:@"색%d", cur.color] : @"?", cur ? cur.num : 0, best ? best.num : 0, plain, special];
     }
-    if (!best) return @"🌱 쓸 꽃잎 없음";
 
-    // A start that did not turn into a live session (no permission, refused) is
-    // not retried every pass.
-    static NSTimeInterval lastStart = -1e9;
-    if (pkMono() - lastStart < 60) return @"🌱 시작 요청 후 대기 중";
+    // Not live. Forget the stack we were spending — unless we only just asked
+    // to start and the session has not gone live yet.
+    if (pkMono() - gLastStart > kAdoptGap) gPlantingId = nil;
+    if (plain <= 0) return [NSString stringWithFormat:@"🌱 일반 꽃잎 없음 (특수 %lld 보존)", special];
+    if (!best) return @"🌱 쓸 꽃잎 없음";
+    if (pkMono() - gLastStart < kStartGap) return @"🌱 시작 요청 후 대기 중";
+
     void *m = pkMethodOf(plant, "StartPlantingWithConfirmationAsync", 2);
     if (!m) return @"StartPlantingWithConfirmationAsync 없음";
     unsigned char confirm = 0;
     void *a[2] = { pkNewString(best.itemId), &confirm };
     BOOL ok = NO;
     pkInvokeEx(m, plant, a, &ok);
-    lastStart = pkMono();
+    gLastStart = pkMono();
+    if (ok) gPlantingId = best.itemId;
     PALOG(@"[심기] 시작 petal=%@ color=%d kind=%d num=%d (가장 많은 일반 꽃잎) ok=%d", best.itemId, best.color, best.kind, best.num, ok);
     return ok ? [NSString stringWithFormat:@"🌱 심기 시작 — 색 %d 꽃잎 %d장", best.color, best.num] : @"🌱 심기 시작 실패";
 }

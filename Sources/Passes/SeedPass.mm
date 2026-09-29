@@ -13,17 +13,20 @@
 
 @interface PKSeed : NSObject
 @property (nonatomic, copy) NSString *sid;
-@property (nonatomic) int req, cur;
+@property (nonatomic) int req, cur, bonus;
 @property (nonatomic) double blat, blng;
 @end
 @implementation PKSeed
 @end
 
-// The per-seed guard stops the same seed being re-sent before the server has answered.
+// The per-seed guard stops the same seed being re-sent before the server has
+// answered. A refused request (the client's step count can run ahead of the
+// server's) is retried after 30 s, then 60, 120, 240 — a flat two minutes made a
+// single refusal cost two minutes.
 static PKBackoff *backoff(void) {
     static PKBackoff *b;
     static dispatch_once_t once;
-    dispatch_once(&once, ^{ b = [[PKBackoff alloc] initWithBase:120 factor:1 max:120]; });
+    dispatch_once(&once, ^{ b = [[PKBackoff alloc] initWithBase:30 factor:2 max:240]; });
     return b;
 }
 
@@ -42,7 +45,8 @@ NSString *pkSeedPass(void) {
         PKSeed *s = [PKSeed new];
         s.sid = sid;
         s.req = pkGetInt(proto, &F_Seed_req);
-        s.cur = pkGetInt(proto, &F_Seed_cur) + (int)pkGetF32(proto, &F_Seed_bonus);
+        s.bonus = (int)pkGetF32(proto, &F_Seed_bonus);
+        s.cur = pkGetInt(proto, &F_Seed_cur) + s.bonus;
         void *birth = pkGetPtr(proto, &F_Seed_birth);
         s.blat = pkGetF64(birth, &F_Pt_lat);
         s.blng = pkGetF64(birth, &F_Pt_lng);
@@ -58,15 +62,17 @@ NSString *pkSeedPass(void) {
     // 1) Pluck ripe seedlings — one PullPikmin request, up to 5 ids.
     int pulled = 0;
     NSMutableArray<NSString *> *pull = [NSMutableArray array];
+    NSMutableArray<NSString *> *detail = [NSMutableArray array];
     for (PKSeed *s in ripe) {
         if (![backoff() ready:s.sid]) continue;
         [pull addObject:s.sid];
+        [detail addObject:[NSString stringWithFormat:@"%@ %d/%d(+%d) %d번째", s.sid, s.cur, s.req, s.bonus, [backoff() tries:s.sid] + 1]];
         if (pull.count >= 5) break;
     }
     if (pull.count && pkRpcPullSeeds(pull)) {
         for (NSString *sid in pull) [backoff() recordSend:sid];
         pulled = (int)pull.count;
-        PALOG(@"[모종] 뽑기 %@", [pull componentsJoinedByString:@","]);
+        PALOG(@"[모종] 뽑기 %@", [detail componentsJoinedByString:@" | "]);
     }
 
     // 2) Count free planter slots.

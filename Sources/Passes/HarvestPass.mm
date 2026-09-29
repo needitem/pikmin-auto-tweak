@@ -46,25 +46,29 @@ NSString *pkHarvestPass(void) {
         [backoff() recordSend:p.pid signature:[NSString stringWithFormat:@"%d/%d/%d", p.flowerState, p.flowerCount, p.wilted]];
     };
 
-    // The game's own path when we have it: it batches and keeps the client's
-    // prediction bookkeeping straight.
-    void *action = pkAction();
-    void *sched = action ? pkMethodOf(action, "SchedulePickPikminFlowerBatchedRequest", 1) : NULL;
-    if (sched) {
-        for (PKPikmin *p in ids) {
-            void *a[1] = { pkNewString(p.pid) };
-            pkInvoke(sched, action, a);
-            note(p);
-        }
-        return [NSString stringWithFormat:@"🌸 수확(게임경로) %lu마리 / 꽃잎 %lld", (unsigned long)ids.count, pickable];
-    }
-    // Otherwise the plain RPC, five ids at a time as feeding does.
+    // Direct request first: five ids each, every chunk in this same pass, so the
+    // whole squad is picked at once. The game's own scheduler
+    // (SchedulePickPikminFlowerBatchedRequest) queues into its own throttled
+    // batches and dribbles a few Pikmin at a time — 37 flowers took over a minute
+    // — so it is only the fallback when the direct request cannot be built.
     int sent = 0;
     for (NSUInteger i = 0; i < ids.count; i += 5) {
         NSArray<PKPikmin *> *chunk = [ids subarrayWithRange:NSMakeRange(i, MIN((NSUInteger)5, ids.count - i))];
         NSMutableArray<NSString *> *pids = [NSMutableArray array];
         for (PKPikmin *p in chunk) [pids addObject:p.pid];
         if (pkRpcPickFlowers(pids)) { sent += (int)chunk.count; for (PKPikmin *p in chunk) note(p); }
+    }
+    if (!sent) {
+        void *action = pkAction();
+        void *sched = action ? pkMethodOf(action, "SchedulePickPikminFlowerBatchedRequest", 1) : NULL;
+        if (sched) {
+            for (PKPikmin *p in ids) {
+                void *a[1] = { pkNewString(p.pid) };
+                pkInvoke(sched, action, a);
+                note(p);
+            }
+            return [NSString stringWithFormat:@"🌸 수확(게임경로 대체) %lu마리 / 꽃잎 %lld", (unsigned long)ids.count, pickable];
+        }
     }
     return sent ? [NSString stringWithFormat:@"🌸 수확 %d마리 / 꽃잎 %lld (자라는 중 %lu)", sent, pickable, (unsigned long)growing]
                 : @"🌸 수확 전송 실패";
