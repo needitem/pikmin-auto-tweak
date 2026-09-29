@@ -31,6 +31,13 @@ typedef char*        (*t_type_get_name)(const void*);
 typedef void         (*t_free)(void*);
 typedef void         (*t_format_exception)(const void*, char*, int);
 typedef void         (*t_wbarrier_set_field)(void*, void**, void*);
+typedef void*        (*t_class_get_fields)(void*, void**);
+typedef const void*  (*t_field_get_type)(void*);
+typedef int          (*t_type_get_type)(const void*);
+typedef int          (*t_field_get_flags)(void*);
+typedef void*        (*t_class_from_type)(const void*);
+typedef bool         (*t_class_is_valuetype)(const void*);
+typedef void*        (*t_class_get_parent)(void*);
 
 static t_domain_get f_domain_get;
 static t_thread_attach f_thread_attach;
@@ -57,6 +64,13 @@ static t_type_get_name f_type_get_name;
 static t_free f_free;
 static t_format_exception f_format_exception;
 static t_wbarrier_set_field f_wbarrier_set_field;
+static t_class_get_fields f_class_get_fields;
+static t_field_get_type f_field_get_type;
+static t_type_get_type f_type_get_type;
+static t_field_get_flags f_field_get_flags;
+static t_class_from_type f_class_from_type;
+static t_class_is_valuetype f_class_is_valuetype;
+static t_class_get_parent f_class_get_parent;
 
 static void *gUnity = NULL;
 #define SYM(v, name) v = (decltype(v))dlsym(gUnity ? gUnity : RTLD_DEFAULT, name)
@@ -106,6 +120,13 @@ BOOL pkRuntimeReady(void) {
     SYM(f_free, "il2cpp_free");
     SYM(f_format_exception, "il2cpp_format_exception");
     SYM(f_wbarrier_set_field, "il2cpp_gc_wbarrier_set_field");
+    SYM(f_class_get_fields, "il2cpp_class_get_fields");
+    SYM(f_field_get_type, "il2cpp_field_get_type");
+    SYM(f_type_get_type, "il2cpp_type_get_type");
+    SYM(f_field_get_flags, "il2cpp_field_get_flags");
+    SYM(f_class_from_type, "il2cpp_class_from_type");
+    SYM(f_class_is_valuetype, "il2cpp_class_is_valuetype");
+    SYM(f_class_get_parent, "il2cpp_class_get_parent");
     done = f_domain_get && f_domain_get_assemblies && f_assembly_get_image &&
            f_class_from_name && f_class_get_method_from_name &&
            f_class_get_field_from_name && f_field_get_offset && f_object_new &&
@@ -150,6 +171,10 @@ void *pkClass(const char *ns, const char *name) {
 }
 
 void *pkClassOf(void *obj) { return obj ? f_object_get_class(obj) : NULL; }
+NSString *pkClassName(void *obj) {
+    void *k = pkClassOf(obj);
+    return (k && f_class_get_name) ? @(f_class_get_name(k) ?: "?") : nil;
+}
 
 void *pkMethod(void *cls, const char *name, int argc) {
     if (!cls || !name) return NULL;
@@ -256,6 +281,28 @@ NSString *pkParamTypeName(void *method, int index) {
     NSString *s = n ? @(n) : nil;
     if (n && f_free) f_free(n);
     return s;
+}
+
+// Il2CppTypeEnum: CLASS 0x12, GENERICINST 0x15, OBJECT 0x1c. (VALUETYPE 0x11 is
+// an inline struct — its bytes are not a pointer.) FIELD_ATTRIBUTE_STATIC = 0x10.
+void pkEachRefField(void *obj, void (^fn)(void *child)) {
+    if (!obj || !f_class_get_fields || !f_field_get_type || !f_type_get_type || !f_field_get_flags) return;
+    for (void *k = pkClassOf(obj); k; k = f_class_get_parent ? f_class_get_parent(k) : NULL) {
+        void *iter = NULL, *fld;
+        while ((fld = f_class_get_fields(k, &iter))) {
+            if (f_field_get_flags(fld) & 0x10) continue;
+            const void *t = f_field_get_type(fld);
+            int ty = t ? f_type_get_type(t) : 0;
+            BOOL isRef = ty == 0x12 || ty == 0x1c;
+            if (ty == 0x15 && f_class_from_type && f_class_is_valuetype) {      // Foo<T>: a reference unless it is a struct
+                void *gk = f_class_from_type(t);
+                isRef = gk && !f_class_is_valuetype(gk);
+            }
+            if (!isRef) continue;
+            void *child = *(void **)((char *)obj + f_field_get_offset(fld));
+            if (child) fn(child);
+        }
+    }
 }
 
 // ---------- hooks / GC ----------

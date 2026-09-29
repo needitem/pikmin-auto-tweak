@@ -30,6 +30,7 @@ BOOL pkRuntimeReady(void);   // resolves the API once; false until armed and Uni
 
 void *pkClass(const char *ns, const char *name);                 // cached
 void *pkClassOf(void *obj);
+NSString *pkClassName(void *obj);                                // "Boolean", "ReactiveProperty`1", …
 void *pkMethod(void *cls, const char *name, int argc);           // cached
 void *pkMethodOf(void *obj, const char *name, int argc);
 void *pkNestedClass(void *outer, const char *name);              // Outer.Types.Inner
@@ -51,6 +52,10 @@ void  pkWriteRef(void *obj, void **slot, void *value);           // GC write bar
 // Reflection over overloads (used to tell apart same-arity overloads).
 void pkEachMethod(void *cls, void (^fn)(void *method, const char *name, int argc));
 NSString *pkParamTypeName(void *method, int index);
+
+// Every non-null reference-typed instance field of `obj` (own class and parents),
+// as the referenced objects. Value-type fields are never read as pointers.
+void pkEachRefField(void *obj, void (^fn)(void *child));
 
 // Hooks.
 BOOL pkHookMethod(void *cls, const char *method, int argc, void *hook, void **orig);

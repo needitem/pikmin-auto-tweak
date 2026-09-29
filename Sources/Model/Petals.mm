@@ -4,6 +4,7 @@
 #import "Frame.h"
 #import "Inventory.h"
 #import "Layout.h"
+#import "Nectar.h"
 
 @implementation PKPetal
 @end
@@ -20,7 +21,10 @@ static NSArray<PKPetal *> *scanPetals(void) {
         p.kind = pkGetInt(proto, &F_Petal_kind);
         p.num = pkGetInt(proto, &F_Petal_num);
         p.flowerName = pkGetStr(proto, &F_Petal_fkind) ?: @"";
-        p.special = p.kind != 0 || p.flowerName.length > 0;
+        // Same rule as nectar: kind 5 is COMMON (the four colours x kind 5 are the
+        // ordinary stacks; confirmed against the in-game plain-petal total); only a
+        // named flower is special.
+        p.special = pkNectarIsSpecial(p.flowerName, p.kind);
         if (p.num > 0) [out addObject:p];
     });
     return out;
@@ -70,7 +74,7 @@ static NSString *namedKey(int color, NSString *name) {
 
 NSString *pkBucketOfPetal(PKPetal *p) {
     if (p.flowerName.length) return namedKey(p.color, p.flowerName);
-    if (p.kind == 0) return plainKey(p.color);
+    if (!p.special) return plainKey(p.color);
     return [NSString stringWithFormat:@"c%d|k%d", p.color, p.kind];   // unnamed special: matches nothing else
 }
 
@@ -80,8 +84,8 @@ NSString *pkBucketOfNectar(PKNectar *n) {
 }
 
 // A bloom carries only a kind NUMBER, which is not comparable with a name —
-// so only the plain flower (kind 0) is nameable.
+// so only the plain flower (kind 0 or COMMON) is nameable.
 NSString *pkBucketOfBloom(PKPikmin *p) {
     if (!p.hasBloom) return nil;
-    return p.bloomKind == 0 ? plainKey(p.bloomColor) : nil;
+    return pkNectarIsSpecial(nil, p.bloomKind) ? nil : plainKey(p.bloomColor);
 }

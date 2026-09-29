@@ -75,7 +75,6 @@
     X(CS_pikmin,      "pikmin_",                         NULL,      0x78) \
     X(PS_minTroop,    "minTroopPikminCount_",            NULL,      0x1C) \
     /* planting, seedlings, planters */ \
-    X(Plant_started,  "isStarted",                       NULL,      0x118) \
     X(Seed_birth,     "birthPlacePoint_",                NULL,      0x28) \
     X(Seed_req,       "requiredSteps_",                  NULL,      0x50) \
     X(Seed_cur,       "currentSteps_",                   NULL,      0x54) \

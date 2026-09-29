@@ -1,6 +1,7 @@
 #import "Scheduler.h"
 #import "Clock.h"
 #import "Frame.h"
+#import "SingletonFinder.h"
 #import "FrameRate.h"
 #import "GameContext.h"
 #import "Hooks.h"
@@ -123,6 +124,7 @@ void pkSchedulerTick(void) {
 static void maintenance(void) {
     static int beat = 0;
     pkInstallHooks();
+    pkResolveSingletons();                             // adopt what the hooks have not caught
     if (++beat % 60) return;
     static NSArray *therm = @[ @"정상", @"주의", @"높음", @"위험" ];
     UIDevice.currentDevice.batteryMonitoringEnabled = YES;
