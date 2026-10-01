@@ -16,7 +16,7 @@ NSString * const PKFeaturesChangedNotification = @"PKFeaturesChanged";
 
 static const NSTimeInterval kTickGap = 0.7;        // the 1 s timer and 1 Hz location fixes must not double-fire
 static const NSTimeInterval kMapPace = 30.0;       // mapobjects.json refresh
-static const NSTimeInterval kRosterPace = 30.0;    // roster.json/.txt refresh
+static const NSTimeInterval kRosterPace = 60.0;    // roster.json/.txt refresh (planning data, not time-critical)
 static const NSTimeInterval kFpsPace = 20.0;
 static const NSTimeInterval kBgNotePace = 300.0;
 
@@ -24,12 +24,15 @@ static const NSTimeInterval kBgNotePace = 300.0;
 // How long each pass actually takes; without it, tuning cadences is guesswork.
 // Reported by the heartbeat as total-ms/calls.
 static NSMutableDictionary<NSString *, NSNumber *> *gPassMs, *gPassN;
-static NSString *timed(NSString *name, NSString *(^body)(void)) {
+static void noteMs(NSString *name, NSTimeInterval seconds) {
     if (!gPassMs) { gPassMs = [NSMutableDictionary dictionary]; gPassN = [NSMutableDictionary dictionary]; }
+    gPassMs[name] = @(gPassMs[name].doubleValue + seconds * 1000.0);
+    gPassN[name] = @(gPassN[name].intValue + 1);
+}
+static NSString *timed(NSString *name, NSString *(^body)(void)) {
     NSTimeInterval t0 = pkMono();
     NSString *r = body();
-    gPassMs[name] = @(gPassMs[name].doubleValue + (pkMono() - t0) * 1000.0);
-    gPassN[name] = @(gPassN[name].intValue + 1);
+    noteMs(name, pkMono() - t0);
     return r;
 }
 static NSString *takeTimings(void) {
@@ -52,16 +55,18 @@ static void runFeature(PKFeature *f) {
 
 // ---------- shared switches ----------
 static void syncSideEffects(void) {
-    BOOL camera = NO, throttle = NO;
+    BOOL camera = NO, automating = NO;
     for (PKFeature *f in pkFeatures()) {
         if (!f.enabled) continue;
         camera |= f.suppressCamera;
+        automating |= f.inAuto;
     }
-    // Rendering a map nobody watches is the heat source: cap the frame rate
-    // while the pipeline that needs the phone awake is running.
-    throttle = [PKSettings boolForKey:kKeyFeed] || [PKSettings boolForKey:kKeyExpedition];
+    // Rendering the map is the heat source: cap the frame rate while any part of
+    // the pipeline is running. The cap is constant on purpose — the phone is in
+    // the player's hand most of the time, so a cap that lifts on touch would
+    // never be on.
     pkSetCameraSuppress(camera);
-    pkApplyFrameRate(throttle);
+    pkApplyFrameRate(automating);
 }
 
 static void changed(void) {
@@ -92,9 +97,17 @@ void pkAutoSetEnabled(BOOL on) {
 // ---------- the tick ----------
 void pkSchedulerTick(void) {
     static NSTimeInterval last = 0, lastMap = 0, lastRoster = 0, lastFps = 0, lastBg = 0;
+    static BOOL started = NO;
     NSTimeInterval now = pkMono();
     if (now - last < kTickGap) return;
     last = now;
+    if (!started) {
+        // Phase the periodic work so it does not all land on one tick: the two
+        // dumps used to fire together with the 30 s passes.
+        started = YES;
+        lastMap = now - kMapPace + 11.0;
+        lastRoster = now - kRosterPace + 23.0;
+    }
 
     // Screen off, Unity draws nothing: full speed is fine, the app stays alive
     // on the location session.
@@ -123,8 +136,13 @@ void pkSchedulerTick(void) {
 // ---------- maintenance ----------
 static void maintenance(void) {
     static int beat = 0;
+    // Only runs that did real work are recorded, so the [hb] ms/calls reads as
+    // the cost of one run.
+    NSTimeInterval t0 = pkMono();
     pkInstallHooks();
-    pkResolveSingletons();                             // adopt what the hooks have not caught
+    NSTimeInterval t1 = pkMono();
+    if (t1 - t0 >= 0.001) noteMs(@"훅", t1 - t0);
+    if (pkResolveSingletons()) noteMs(@"finder", pkMono() - t1);   // adopt what the hooks have not caught
     if (++beat % 60) return;
     static NSArray *therm = @[ @"정상", @"주의", @"높음", @"위험" ];
     UIDevice.currentDevice.batteryMonitoringEnabled = YES;

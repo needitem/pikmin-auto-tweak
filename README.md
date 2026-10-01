@@ -33,7 +33,7 @@ Dependencies point downward only; each module has one reason to change.
 | `pa_feed` `pa_harvest` `pa_collect` `pa_expedition` `pa_plant` `pa_poi` `pa_seed` `pa_troop` | the eight 자동성장 features |
 | `pa_number` | Pikmin numbering (default on) |
 | `pa_camsuppress` | keep the camera still while automating (default on) |
-| `pa_fps` | frame-rate cap while automating (default 20, 5–60) |
+| `pa_fps` | frame-rate cap while automating (5–60; default 0 = no cap) |
 | `pa_debug` | install request-logging hooks (needs a relaunch) |
 | `pa_special`, `pa_special_id` | pinned special nectar (set from the game's own selection) |
 

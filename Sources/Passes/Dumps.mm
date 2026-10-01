@@ -7,6 +7,8 @@
 #import "MapObjects.h"
 #import "Roster.h"
 #import "SharedFile.h"
+#import <cmath>
+#import <string>
 
 // Both dumps rewrite only when their content changed (position, which moves
 // constantly, is not part of the comparison) or once a minute regardless. The
@@ -14,11 +16,21 @@
 // report; the walk needs a couple of kilobytes a minute.
 static const NSTimeInterval kMinRewrite = 60.0;
 
-// Exact content comparison (NSData.hash only looks at the first 80 bytes).
-static BOOL unchanged(NSData *now, NSData *__strong *last, NSTimeInterval *lastWrite) {
+// Change detection by a 64-bit FNV-1a over the fields that matter. It used to be
+// a full JSON serialisation of every row just to be compared and thrown away,
+// which for 600+ Pikmin cost more than the file write it was avoiding.
+// A false "unchanged" (a collision) only delays a rewrite until the minute gate.
+static uint64_t fnv(uint64_t h, const void *p, size_t n) {
+    const unsigned char *b = (const unsigned char *)p;
+    while (n--) { h ^= *b++; h *= 0x100000001b3ULL; }
+    return h;
+}
+static const uint64_t kFnvBasis = 0xcbf29ce484222325ULL;
+
+static BOOL unchanged(uint64_t sig, uint64_t *last, BOOL *haveLast, NSTimeInterval *lastWrite) {
     NSTimeInterval t = pkMono();
-    if (*last && [*last isEqualToData:now] && t - *lastWrite < kMinRewrite) return YES;
-    *last = now; *lastWrite = t;
+    if (*haveLast && *last == sig && t - *lastWrite < kMinRewrite) return YES;
+    *last = sig; *haveLast = YES; *lastWrite = t;
     return NO;
 }
 
@@ -27,16 +39,23 @@ static BOOL unchanged(NSData *now, NSData *__strong *last, NSTimeInterval *lastW
 void pkMapDumpPass(void) {
     NSArray<PKMapObject *> *objs = pkMapObjects();
     if (!objs) return;
+    uint64_t sig = kFnvBasis;
+    for (PKMapObject *o in objs) {
+        if (o.kind != PK_MO_POIFLOWER && o.kind != PK_MO_MUSHROOM) continue;
+        const char *id = o.oid.UTF8String;
+        struct { int kind, state, color, visited; double lat, lng; long long bloom; } v =
+            { o.kind, o.state, o.color, o.visited, o.lat, o.lng, o.bloomMs };
+        sig = fnv(fnv(sig, id, strlen(id)), &v, sizeof v);
+    }
+    static uint64_t last; static BOOL haveLast; static NSTimeInterval lastWrite;
+    if (unchanged(sig, &last, &haveLast, &lastWrite)) return;
+
     NSMutableArray *rows = [NSMutableArray array];
     for (PKMapObject *o in objs) {
         if (o.kind != PK_MO_POIFLOWER && o.kind != PK_MO_MUSHROOM) continue;
         [rows addObject:@{ @"id": o.oid, @"kind": @(o.kind), @"lat": @(o.lat), @"lng": @(o.lng),
                            @"state": @(o.state), @"color": @(o.color), @"bloom": @(o.bloomMs), @"visited": @(o.visited) }];
     }
-    NSData *body = [NSJSONSerialization dataWithJSONObject:rows options:NSJSONWritingSortedKeys error:nil];
-    static NSData *last; static NSTimeInterval lastWrite;
-    if (!body || unchanged(body, &last, &lastWrite)) return;
-
     double lat = 0, lng = 0; pkLocationGet(&lat, &lng);
     NSDictionary *doc = @{ @"t": @([NSDate date].timeIntervalSince1970), @"lat": @(lat), @"lng": @(lng), @"objs": rows };
     NSData *json = [NSJSONSerialization dataWithJSONObject:doc options:0 error:nil];
@@ -50,75 +69,92 @@ void pkMapDumpPass(void) {
 }
 
 // ---------- roster (for planning mushroom battles) ----------
-static NSString *colorName(int c) {
-    switch (c) { case 1: return @"빨강"; case 2: return @"파랑"; case 3: return @"노랑"; case 4: return @"하양";
-        case 5: return @"보라"; case 6: return @"바위"; case 7: return @"날개"; case 8: return @"얼음"; }
-    return @"미상";
+static const char *const kColorNames[9] = { "미상", "빨강", "파랑", "노랑", "하양", "보라", "바위", "날개", "얼음" };
+static int colorIdx(int c) { return (c >= 1 && c <= 8) ? c : 0; }
+static int flowerIdx(int s) { return s == PK_PF_FLOWER ? 0 : s == PK_PF_BUD ? 1 : s == PK_PF_LEAF ? 2 : 3; }
+static const char *flowerName(int s) {
+    switch (s) { case PK_PF_LEAF: return "잎"; case PK_PF_BUD: return "봉우리"; case PK_PF_FLOWER: return "꽃";
+        case PK_PF_PICK: return "수확대기"; case PK_PF_WILTED: return "시듦"; }
+    return "?";
 }
-static NSString *flowerName(int s) {
-    switch (s) { case PK_PF_LEAF: return @"잎"; case PK_PF_BUD: return @"봉우리"; case PK_PF_FLOWER: return @"꽃";
-        case PK_PF_PICK: return @"수확대기"; case PK_PF_WILTED: return @"시듦"; }
-    return @"?";
-}
-static NSString *statusName(int s) {
-    switch (s) { case PK_STATUS_AVAILABLE: return @"대기"; case PK_STATUS_TASK: return @"작업중"; case PK_STATUS_ENTOURAGE: return @"동행"; }
-    return @"?";
+static int statusIdx(int s) { return s == PK_STATUS_AVAILABLE ? 0 : s == PK_STATUS_TASK ? 1 : s == PK_STATUS_ENTOURAGE ? 2 : -1; }
+static const char *const kStatusNames[3] = { "대기", "작업중", "동행" };
+
+// JSON string body (no quotes): the characters JSON requires escaped.
+static void appendEscaped(std::string &out, const char *u) {
+    for (; u && *u; u++) {
+        unsigned char c = (unsigned char)*u;
+        if (c == '"' || c == '\\') { out += '\\'; out += (char)c; }
+        else if (c < 0x20) { char b[8]; snprintf(b, sizeof b, "\\u%04x", c); out += b; }
+        else out += (char)c;
+    }
 }
 
 void pkRosterDumpPass(void) {
     NSArray<PKPikmin *> *all = pkRoster();
     if (!all) return;
-    NSMutableArray *rows = [NSMutableArray array];
-    NSMutableArray<NSNumber *> *steps = [NSMutableArray array];   // walking changes these constantly: kept out of the change check
-    NSCountedSet *byColor = [NSCountedSet set], *byStatus = [NSCountedSet set];
-    NSMutableDictionary<NSString *, NSMutableDictionary *> *flowered = [NSMutableDictionary dictionary];
-    int starred = 0, decor = 0;
+
+    // Walking changes `steps` constantly, so it stays out of the change check.
+    uint64_t sig = kFnvBasis;
     for (PKPikmin *p in all) {
-        NSString *ck = colorName(p.color);
-        [rows addObject:@{ @"name": p.name ?: @"", @"color": @(p.color), @"colorName": ck,
-                           @"flower": @(p.flowerState), @"flowerName": flowerName(p.flowerState),
-                           @"status": @(p.status), @"statusName": statusName(p.status),
-                           @"hearts": @(p.hearts), @"fpt": @(p.heartPoints),
-                           @"asset": @(p.asset), @"category": @(p.category), @"deco": @(p.isDecor),
-                           @"starred": @(p.starred) }];
-        [steps addObject:@(p.steps)];
-        [byColor addObject:ck];
-        [byStatus addObject:statusName(p.status)];
+        const char *name = p.name.UTF8String ?: "";
+        sig = fnv(sig, name, strlen(name) + 1);
+        int v[8] = { p.color, p.flowerState, p.status, 0, p.heartPoints, p.asset, p.category, p.starred };
+        float h = p.hearts; memcpy(&v[3], &h, sizeof h);
+        sig = fnv(sig, v, sizeof v);
+    }
+    static uint64_t last; static BOOL haveLast; static NSTimeInterval lastWrite;
+    if (unchanged(sig, &last, &haveLast, &lastWrite)) return;
+
+    int byColor[9] = {0}, byStatus[3] = {0}, flowered[9][4] = {{0}};
+    int starred = 0, decor = 0;
+    std::string rows;
+    rows.reserve(all.count * 190);
+    BOOL first = YES;
+    char buf[320];
+    for (PKPikmin *p in all) {
+        int ci = colorIdx(p.color), si = statusIdx(p.status);
+        byColor[ci]++;
+        if (si >= 0) byStatus[si]++;
+        flowered[ci][flowerIdx(p.flowerState)]++;
         if (p.starred) starred++;
         if (p.isDecor) decor++;
-        NSMutableDictionary *fc = flowered[ck];
-        if (!fc) { fc = [@{ @"꽃": @0, @"봉우리": @0, @"잎": @0, @"기타": @0 } mutableCopy]; flowered[ck] = fc; }
-        NSString *fk = p.flowerState == PK_PF_FLOWER ? @"꽃" : p.flowerState == PK_PF_BUD ? @"봉우리" : p.flowerState == PK_PF_LEAF ? @"잎" : @"기타";
-        fc[fk] = @([fc[fk] intValue] + 1);
+        rows += first ? "\n" : ",\n"; first = NO;
+        rows += "{\"name\":\"";
+        appendEscaped(rows, p.name.UTF8String);
+        snprintf(buf, sizeof buf,
+                 "\",\"color\":%d,\"colorName\":\"%s\",\"flower\":%d,\"flowerName\":\"%s\",\"status\":%d,\"statusName\":\"%s\","
+                 "\"hearts\":%.6g,\"fpt\":%d,\"asset\":%d,\"category\":%d,\"deco\":%s,\"starred\":%s,\"steps\":%lld}",
+                 p.color, kColorNames[ci], p.flowerState, flowerName(p.flowerState), p.status, si >= 0 ? kStatusNames[si] : "?",
+                 std::isfinite(p.hearts) ? (double)p.hearts : 0.0, p.heartPoints, p.asset, p.category, p.isDecor ? "true" : "false", p.starred ? "true" : "false", p.steps);
+        rows += buf;
     }
-    NSData *sig = [NSJSONSerialization dataWithJSONObject:rows options:NSJSONWritingSortedKeys error:nil];
-    static NSData *last; static NSTimeInterval lastWrite;
-    if (!sig || unchanged(sig, &last, &lastWrite)) return;
+    std::string json;
+    json.reserve(rows.size() + 128);
+    snprintf(buf, sizeof buf, "{\"t\":%.3f,\"total\":%lu,\"starred\":%d,\"pikmin\":[", [NSDate date].timeIntervalSince1970,
+             (unsigned long)all.count, starred);
+    json += buf; json += rows; json += "\n]}\n";
+    pkWriteShared(@"roster.json", [NSData dataWithBytes:json.data() length:json.size()]);
 
-    NSMutableArray *outRows = [NSMutableArray arrayWithCapacity:rows.count];
-    for (NSUInteger i = 0; i < rows.count; i++) {
-        NSMutableDictionary *r = [rows[i] mutableCopy];
-        r[@"steps"] = steps[i];
-        [outRows addObject:r];
+    std::string txt;
+    snprintf(buf, sizeof buf, "=== 보유 피크민 %lu마리 (즐겨찾기 %d) ===\n[색상별]\n", (unsigned long)all.count, starred);
+    txt += buf;
+    static const int order[9] = { 1, 2, 3, 4, 5, 6, 7, 8, 0 };
+    for (int k = 0; k < 9; k++) {
+        int c = order[k];
+        if (!byColor[c]) continue;
+        snprintf(buf, sizeof buf, "  %s %d마리  (꽃 %d / 봉우리 %d / 잎 %d)\n", kColorNames[c], byColor[c],
+                 flowered[c][0], flowered[c][1], flowered[c][2]);
+        txt += buf;
     }
-    NSDictionary *doc = @{ @"t": @([NSDate date].timeIntervalSince1970), @"total": @(rows.count), @"starred": @(starred), @"pikmin": outRows };
-    NSData *json = [NSJSONSerialization dataWithJSONObject:doc options:NSJSONWritingPrettyPrinted error:nil];
-    if (json) pkWriteShared(@"roster.json", json);
-
-    NSMutableString *txt = [NSMutableString string];
-    [txt appendFormat:@"=== 보유 피크민 %lu마리 (즐겨찾기 %d) ===\n[색상별]\n", (unsigned long)rows.count, starred];
-    for (NSString *c in @[@"빨강", @"파랑", @"노랑", @"하양", @"보라", @"바위", @"날개", @"얼음", @"미상"]) {
-        NSUInteger n = [byColor countForObject:c];
-        if (!n) continue;
-        NSDictionary *fc = flowered[c];
-        [txt appendFormat:@"  %@ %lu마리  (꽃 %@ / 봉우리 %@ / 잎 %@)\n", c, (unsigned long)n, fc[@"꽃"] ?: @0, fc[@"봉우리"] ?: @0, fc[@"잎"] ?: @0];
+    txt += "[상태별]\n";
+    for (int k = 0; k < 3; k++) {
+        if (!byStatus[k]) continue;
+        snprintf(buf, sizeof buf, "  %s %d마리\n", kStatusNames[k], byStatus[k]);
+        txt += buf;
     }
-    [txt appendString:@"[상태별]\n"];
-    for (NSString *s in @[@"대기", @"작업중", @"동행"]) {
-        NSUInteger n = [byStatus countForObject:s];
-        if (n) [txt appendFormat:@"  %@ %lu마리\n", s, (unsigned long)n];
-    }
-    [txt appendFormat:@"[데코] 코스튬 착용 %d마리 (방출 제외 권장)\n", decor];
-    pkWriteShared(@"roster.txt", [txt dataUsingEncoding:NSUTF8StringEncoding]);
-    PALOG(@"[로스터] %lu마리 기록", (unsigned long)rows.count);
+    snprintf(buf, sizeof buf, "[데코] 코스튬 착용 %d마리 (방출 제외 권장)\n", decor);
+    txt += buf;
+    pkWriteShared(@"roster.txt", [NSData dataWithBytes:txt.data() length:txt.size()]);
+    PALOG(@"[로스터] %lu마리 기록", (unsigned long)all.count);
 }

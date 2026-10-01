@@ -32,6 +32,18 @@ static PKBackoff *backoff(void) {
     return b;
 }
 
+// A task the game would refuse to start ("힘 부족", or a StartDisabledReason)
+// cost a full candidate walk every pass — each candidate means game calls that
+// recompute the task's cached stats — for the same answer. It waits, shorter
+// than the backoff above because a refusal here is the game's own verdict and
+// can lift as soon as Pikmin come home or grow.
+static PKBackoff *refused(void) {
+    static PKBackoff *b;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ b = [[PKBackoff alloc] initWithBase:20 factor:2 max:120]; });
+    return b;
+}
+
 // Candidates, decided the way the game decides. PikminInventoryTools.
 // ReservingPikminForTroop: troop members ARE sendable; the game only holds back
 // enough of them to keep the troop at its minimum size:
@@ -64,8 +76,8 @@ static NSArray<PKPikmin *> *candidates(NSArray<PKPikmin *> *roster) {
     if (grown.count) out = grown;
 
     if (!out.count)
-        PALOG(@"[탐험] 후보0 — 전체 %lu, 작업중제외 %d, 즐겨찾기제외 %d, 부대유보 %d/%d (부대 %d, 최소 %d)",
-              (unsigned long)roster.count, nBusy, nStarred, held, need, troop.total, minTroop);
+        PKLOGC(@"exp.nopool", ([NSString stringWithFormat:@"[탐험] 후보0 — 전체 %lu, 작업중제외 %d, 즐겨찾기제외 %d, 부대유보 %d/%d (부대 %d, 최소 %d)",
+              (unsigned long)roster.count, nBusy, nStarred, held, need, troop.total, minTroop]));
     else
         PKLOGC(@"exp.pool", ([NSString stringWithFormat:@"[탐험] 후보 %lu마리 (부대원 포함 %d, 부대유보 %d, 부대 %d, 최소 %d)",
                               (unsigned long)out.count, poolInTroop, held, troop.total, minTroop]));
@@ -93,6 +105,7 @@ NSString *pkExpeditionPass(void) {
         if (k) [alive addObject:k];
     }
     [backoff() pruneKeeping:alive];
+    [refused() pruneKeeping:alive];
     PKLOGC(@"exp.census", ([NSString stringWithFormat:@"[탐험] 스토어 %lu건 / 탐험 %d건 / 미출발 %d건",
                             (unsigned long)exps.count, nExp, nIdle]));
 
@@ -115,7 +128,7 @@ NSString *pkExpeditionPass(void) {
         // inside that round trip would send it again. Still Available after a
         // send means the server did not take it.
         NSString *tkey = pkExpeditionKey(d);
-        if (tkey && ![backoff() ready:tkey]) continue;
+        if (tkey && (![backoff() ready:tkey] || ![refused() ready:tkey])) continue;
 
         int maxN = pkUnboxInt(pkCall0(d, "get_MaxPikminsAllowed"));
         if (maxN <= 0) continue;
@@ -138,6 +151,7 @@ NSString *pkExpeditionPass(void) {
         }
         if (!ready) {
             pkExpeditionSetParty(d, original);
+            if (tkey) [refused() recordSend:tkey];
             PKLOGC(@"exp.weak", ([NSString stringWithFormat:@"[탐험] 힘 부족 — 후보 %lu, 뽑음 %lu, 최대 %d",
                                   (unsigned long)cands.count, (unsigned long)picked.count, maxN]));
             continue;
@@ -147,6 +161,7 @@ NSString *pkExpeditionPass(void) {
         void *why = pkCall0(d, "get_StartDisabledReason");
         if (why) {
             pkExpeditionSetParty(d, original);
+            if (tkey) [refused() recordSend:tkey];
             PKLOGC(@"exp.skip", ([NSString stringWithFormat:@"[탐험] 건너뜀 — %@", pkStr(why) ?: @"불가"]));
             continue;
         }

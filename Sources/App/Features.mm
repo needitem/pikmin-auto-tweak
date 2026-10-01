@@ -1,4 +1,5 @@
 #import "Feature.h"
+#import "Clock.h"
 #import "Passes.h"
 #import "Settings.h"
 
@@ -34,6 +35,14 @@ NSArray<PKFeature *> *pkFeatures(void) {
             make(kKeyTroop,      @"부대", @"부대",     30,   YES,  NO,   NO,  pkTroopPass),       // an arrange RPC never moves the camera
             make(kKeyNumber,     @"번호", @"번호",     15,   NO,   NO,   YES, pkNumberingPass),   // not part of 자동성장
         ];
+        // Stagger the first runs. Every feature used to start at lastRun = 0, so
+        // equal paces (harvest/탐험 at 8 s, 모종/수집 at 10 s, 심기/부대 at 30 s)
+        // stayed on the same tick forever and their scans stacked into one long
+        // main-thread stall. A distinct phase per feature keeps them apart.
+        NSTimeInterval now = pkMono();
+        [all enumerateObjectsUsingBlock:^(PKFeature *f, NSUInteger i, BOOL *stop) {
+            f.lastRun = now - f.pace + fmod(1.0 + 2.0 * (double)i, f.pace);
+        }];
     });
     return all;
 }

@@ -49,6 +49,16 @@ void *pkNewObj(void *cls);                                       // new + .ctor(
 void *pkNewProto(const char *name, void **outCls);               // Ichigo.Proto.<name>
 void  pkWriteRef(void *obj, void **slot, void *value);           // GC write barrier when available
 
+// Offset of a named instance field of `cls` (own class or a parent), or
+// NULL when it has none. For callers that verify what they read.
+void *pkRawFieldOffsetByName(void *cls, const char *name, ptrdiff_t *off);
+// Same, but only for an instance field whose type is a managed reference
+// (class, string, object, non-struct generic) — safe to read as a pointer.
+void *pkRefFieldOffsetByName(void *cls, const char *name, ptrdiff_t *off);
+// "name@0xoff:type; …" for every instance field of `cls` and its parents, for
+// logs that explain a layout we could not match.
+NSString *pkDescribeFields(void *cls);
+
 // Reflection over overloads (used to tell apart same-arity overloads).
 void pkEachMethod(void *cls, void (^fn)(void *method, const char *name, int argc));
 NSString *pkParamTypeName(void *method, int index);

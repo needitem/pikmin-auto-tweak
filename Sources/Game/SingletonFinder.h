@@ -11,4 +11,5 @@
 #import <Foundation/Foundation.h>
 
 // Cheap when nothing is missing. Main thread; needs the il2cpp bridge armed.
-void pkResolveSingletons(void);
+// Returns YES when a walk actually ran (the caller times those).
+BOOL pkResolveSingletons(void);

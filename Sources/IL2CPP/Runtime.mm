@@ -1,6 +1,7 @@
 #import "Runtime.h"
 #import "Log.h"
 #import <dlfcn.h>
+#import <os/lock.h>
 #import <mutex>
 #import <string>
 #import <unordered_map>
@@ -38,6 +39,7 @@ typedef int          (*t_field_get_flags)(void*);
 typedef void*        (*t_class_from_type)(const void*);
 typedef bool         (*t_class_is_valuetype)(const void*);
 typedef void*        (*t_class_get_parent)(void*);
+typedef const char*  (*t_field_get_name)(void*);
 
 static t_domain_get f_domain_get;
 static t_thread_attach f_thread_attach;
@@ -71,6 +73,7 @@ static t_field_get_flags f_field_get_flags;
 static t_class_from_type f_class_from_type;
 static t_class_is_valuetype f_class_is_valuetype;
 static t_class_get_parent f_class_get_parent;
+static t_field_get_name f_field_get_name;
 
 static void *gUnity = NULL;
 #define SYM(v, name) v = (decltype(v))dlsym(gUnity ? gUnity : RTLD_DEFAULT, name)
@@ -80,6 +83,22 @@ void *pkRawFieldOffsetByName(void *cls, const char *name, ptrdiff_t *off) {
     if (!cls || !name || !f_class_get_field_from_name) return NULL;
     void *fld = f_class_get_field_from_name(cls, name);
     if (fld && off) *off = (ptrdiff_t)f_field_get_offset(fld);
+    return fld;
+}
+
+void *pkRefFieldOffsetByName(void *cls, const char *name, ptrdiff_t *off) {
+    if (!cls || !name || !f_class_get_field_from_name || !f_field_get_type || !f_type_get_type || !f_field_get_flags) return NULL;
+    void *fld = f_class_get_field_from_name(cls, name);
+    if (!fld || (f_field_get_flags(fld) & 0x10)) return NULL;               // missing, or static
+    const void *t = f_field_get_type(fld);
+    int ty = t ? f_type_get_type(t) : 0;
+    BOOL isRef = ty == 0x0e || ty == 0x12 || ty == 0x1c;                    // string, class, object
+    if (ty == 0x15 && f_class_from_type && f_class_is_valuetype) {          // Foo<T>: a reference unless it is a struct
+        void *gk = f_class_from_type(t);
+        isRef = gk && !f_class_is_valuetype(gk);
+    }
+    if (!isRef) return NULL;
+    if (off) *off = (ptrdiff_t)f_field_get_offset(fld);
     return fld;
 }
 
@@ -127,6 +146,7 @@ BOOL pkRuntimeReady(void) {
     SYM(f_class_from_type, "il2cpp_class_from_type");
     SYM(f_class_is_valuetype, "il2cpp_class_is_valuetype");
     SYM(f_class_get_parent, "il2cpp_class_get_parent");
+    SYM(f_field_get_name, "il2cpp_field_get_name");
     done = f_domain_get && f_domain_get_assemblies && f_assembly_get_image &&
            f_class_from_name && f_class_get_method_from_name &&
            f_class_get_field_from_name && f_field_get_offset && f_object_new &&
@@ -145,7 +165,49 @@ static void ensureAttached(void) {
 static std::mutex gCacheMu;
 static std::unordered_map<std::string, void *> gClassCache, gMethodCache;
 
+// Lookups happen in tight loops with string literals, and the maps below are
+// keyed by std::string — a heap allocation and a lock per call. These small
+// direct-mapped tables are keyed by the ADDRESS of the name strings (callers
+// pass literals) and checked by content, so a reused buffer can never alias a
+// different name. A miss falls through to the maps.
+struct ClassSlot  { const char *ns, *name; char *nsCopy, *nameCopy; void *cls; };
+struct MethodSlot { void *cls; const char *name; char *nameCopy; int argc; void *method; };
+static const size_t kFastSlots = 256;
+static ClassSlot gClassFast[kFastSlots];
+static MethodSlot gMethodFast[kFastSlots];
+static os_unfair_lock gFastLock = OS_UNFAIR_LOCK_INIT;
+
+static inline size_t slotOf(uintptr_t a, uintptr_t b, uintptr_t c) {
+    uint64_t h = a * 0x9E3779B97F4A7C15ull;
+    h ^= (b + 0x7F4A7C15ull) * 0xC2B2AE3D27D4EB4Full;
+    h ^= c * 0x165667B19E3779F9ull;
+    return (size_t)((h >> 29) & (kFastSlots - 1));
+}
+
+static void *classSlow(const char *ns, const char *name);
 void *pkClass(const char *ns, const char *name) {
+    if (!ns || !name) return NULL;
+    size_t i = slotOf((uintptr_t)ns, (uintptr_t)name, 0);
+    os_unfair_lock_lock(&gFastLock);
+    ClassSlot &s = gClassFast[i];
+    if (s.cls && s.ns == ns && s.name == name && !strcmp(s.nsCopy, ns) && !strcmp(s.nameCopy, name)) {
+        void *c = s.cls;
+        os_unfair_lock_unlock(&gFastLock);
+        return c;
+    }
+    os_unfair_lock_unlock(&gFastLock);
+    void *cls = classSlow(ns, name);
+    if (!cls) return NULL;                       // not loaded yet: do not remember
+    char *nsCopy = strdup(ns), *nameCopy = strdup(name);
+    os_unfair_lock_lock(&gFastLock);
+    ClassSlot &t = gClassFast[i];
+    free(t.nsCopy); free(t.nameCopy);
+    t = { ns, name, nsCopy, nameCopy, cls };
+    os_unfair_lock_unlock(&gFastLock);
+    return cls;
+}
+
+static void *classSlow(const char *ns, const char *name) {
     if (!f_domain_get || !ns || !name) return NULL;
     std::string key = std::string(ns) + "|" + name;
     {
@@ -176,8 +238,29 @@ NSString *pkClassName(void *obj) {
     return (k && f_class_get_name) ? @(f_class_get_name(k) ?: "?") : nil;
 }
 
+static void *methodSlow(void *cls, const char *name, int argc);
 void *pkMethod(void *cls, const char *name, int argc) {
     if (!cls || !name) return NULL;
+    size_t i = slotOf((uintptr_t)cls, (uintptr_t)name, (uintptr_t)argc);
+    os_unfair_lock_lock(&gFastLock);
+    MethodSlot &s = gMethodFast[i];
+    if (s.nameCopy && s.cls == cls && s.name == name && s.argc == argc && !strcmp(s.nameCopy, name)) {
+        void *m = s.method;
+        os_unfair_lock_unlock(&gFastLock);
+        return m;
+    }
+    os_unfair_lock_unlock(&gFastLock);
+    void *m = methodSlow(cls, name, argc);       // a NULL answer is remembered too, as before
+    char *nameCopy = strdup(name);
+    os_unfair_lock_lock(&gFastLock);
+    MethodSlot &t = gMethodFast[i];
+    free(t.nameCopy);
+    t = { cls, name, nameCopy, argc, m };
+    os_unfair_lock_unlock(&gFastLock);
+    return m;
+}
+
+static void *methodSlow(void *cls, const char *name, int argc) {
     std::string key;
     key.append((const char *)&cls, sizeof(cls));
     key.append(name);
@@ -303,6 +386,21 @@ void pkEachRefField(void *obj, void (^fn)(void *child)) {
             if (child) fn(child);
         }
     }
+}
+
+NSString *pkDescribeFields(void *cls) {
+    if (!cls || !f_class_get_fields || !f_field_get_name || !f_field_get_type || !f_type_get_name) return @"(reflection unavailable)";
+    NSMutableArray *bits = [NSMutableArray array];
+    for (void *k = cls; k && bits.count < 80; k = f_class_get_parent ? f_class_get_parent(k) : NULL) {
+        void *iter = NULL, *fld;
+        while ((fld = f_class_get_fields(k, &iter))) {
+            if (f_field_get_flags && (f_field_get_flags(fld) & 0x10)) continue;
+            char *tn = f_type_get_name(f_field_get_type(fld));
+            [bits addObject:[NSString stringWithFormat:@"%s@0x%zx:%s", f_field_get_name(fld) ?: "?", (size_t)f_field_get_offset(fld), tn ?: "?"]];
+            if (tn && f_free) f_free(tn);
+        }
+    }
+    return [bits componentsJoinedByString:@"; "];
 }
 
 // ---------- hooks / GC ----------
