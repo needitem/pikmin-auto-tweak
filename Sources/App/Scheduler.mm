@@ -18,7 +18,6 @@ static const NSTimeInterval kTickGap = 0.7;        // the 1 s timer and 1 Hz loc
 static const NSTimeInterval kMapPace = 30.0;       // mapobjects.json refresh
 static const NSTimeInterval kRosterPace = 60.0;    // roster.json/.txt refresh (planning data, not time-critical)
 static const NSTimeInterval kFpsPace = 20.0;
-static const NSTimeInterval kBgNotePace = 300.0;
 
 // ---------- pass timing ----------
 // How long each pass actually takes; without it, tuning cadences is guesswork.
@@ -95,9 +94,15 @@ void pkAutoSetEnabled(BOOL on) {
 }
 
 // ---------- the tick ----------
+static BOOL appActive(void) { return [UIApplication sharedApplication].applicationState == UIApplicationStateActive; }
+
 void pkSchedulerTick(void) {
-    static NSTimeInterval last = 0, lastMap = 0, lastRoster = 0, lastFps = 0, lastBg = 0;
+    static NSTimeInterval last = 0, lastMap = 0, lastRoster = 0, lastFps = 0;
     static BOOL started = NO;
+    // Automation only runs while the app is in front. Nothing here keeps the
+    // process alive in the background; if the system keeps the game running
+    // anyway, the passes still stand down.
+    if (!appActive()) return;
     NSTimeInterval now = pkMono();
     if (now - last < kTickGap) return;
     last = now;
@@ -109,11 +114,7 @@ void pkSchedulerTick(void) {
         lastRoster = now - kRosterPace + 23.0;
     }
 
-    // Screen off, Unity draws nothing: full speed is fine, the app stays alive
-    // on the location session.
-    BOOL background = [UIApplication sharedApplication].applicationState != UIApplicationStateActive;
-    if (background && now - lastBg >= kBgNotePace) { lastBg = now; PALOG(@"[bg] 백그라운드에서 계속 동작 중"); }
-    if (!background && now - lastFps >= kFpsPace) { lastFps = now; syncSideEffects(); }   // the game resets the cap across scenes
+    if (now - lastFps >= kFpsPace) { lastFps = now; syncSideEffects(); }   // the game resets the cap across scenes
 
     // A game update that moved fields we cannot find by name pauses everything
     // rather than acting on garbage.
@@ -125,7 +126,7 @@ void pkSchedulerTick(void) {
     // / squad / nectar / petal scan (runFeature nests inside it).
     pkFrameBegin();
     for (PKFeature *f in pkFeatures()) {
-        if (!f.enabled || (f.foregroundOnly && background)) continue;
+        if (!f.enabled) continue;
         if (now - f.lastRun >= f.pace) runFeature(f);
     }
     if (pkMapObj() && now - lastMap >= kMapPace) { lastMap = now; timed(@"map", ^{ pkMapDumpPass(); return @""; }); }
@@ -135,6 +136,7 @@ void pkSchedulerTick(void) {
 
 // ---------- maintenance ----------
 static void maintenance(void) {
+    if (!appActive()) return;
     static int beat = 0;
     // Only runs that did real work are recorded, so the [hb] ms/calls reads as
     // the cost of one run.
@@ -158,7 +160,7 @@ void pkSchedulerStart(void) {
     started = YES;
     [PKSettings registerDefaults];
     pkLayoutInit();
-    pkLocationStart(^{ pkSchedulerTick(); });             // fixes keep arriving in the background too
+    pkLocationStart(^{ pkSchedulerTick(); });
     [NSTimer scheduledTimerWithTimeInterval:1.0 repeats:YES block:^(NSTimer *t) { pkSchedulerTick(); }];
     [NSTimer scheduledTimerWithTimeInterval:1.0 repeats:YES block:^(NSTimer *t) { maintenance(); }];
     syncSideEffects();

@@ -2,6 +2,7 @@
 #import "Clock.h"
 #import "Log.h"
 #import <CoreLocation/CoreLocation.h>
+#import <UIKit/UIKit.h>
 
 static CLLocationManager *gManager = nil;
 static CLLocation *gLast = nil;
@@ -21,10 +22,10 @@ static void (^gOnFix)(void) = nil;
     if (gOnFix) gOnFix();
 }
 - (void)locationManager:(CLLocationManager *)m didFailWithError:(NSError *)e {
-    PKLOGC(@"loc.fail", [NSString stringWithFormat:@"[keepalive] 위치 오류: %@", e.localizedDescription]);
+    PKLOGC(@"loc.fail", [NSString stringWithFormat:@"[위치] 오류: %@", e.localizedDescription]);
 }
 - (void)locationManagerDidChangeAuthorization:(CLLocationManager *)m {
-    PALOG(@"[keepalive] auth changed -> %d", (int)m.authorizationStatus);
+    PALOG(@"[위치] 권한 변경 -> %d", (int)m.authorizationStatus);
 }
 @end
 
@@ -37,15 +38,18 @@ void pkLocationStart(void (^onFix)(void)) {
     gManager = [CLLocationManager new];
     gManager.delegate = gDelegate;
     // Whatever position consumers see is substituted anyway, so a best-accuracy
-    // fix would only heat the phone; wifi/cell accuracy still counts as an
-    // active session.
+    // fix would only heat the phone.
     gManager.desiredAccuracy = kCLLocationAccuracyHundredMeters;
     gManager.distanceFilter = kCLDistanceFilterNone;
-    gManager.pausesLocationUpdatesAutomatically = NO;
-    @try { gManager.allowsBackgroundLocationUpdates = YES; }
-    @catch (NSException *e) { PALOG(@"[keepalive] no background location: %@", e); }
     [gManager startUpdatingLocation];
-    PALOG(@"[keepalive] location session started (bg=%d)", (int)gManager.allowsBackgroundLocationUpdates);
+    // Not a keep-alive: the session is released while the app is in the
+    // background, so the game is left to the system like any other app.
+    NSNotificationCenter *nc = NSNotificationCenter.defaultCenter;
+    [nc addObserverForName:UIApplicationDidEnterBackgroundNotification object:nil queue:NSOperationQueue.mainQueue
+                usingBlock:^(NSNotification *n) { [gManager stopUpdatingLocation]; }];
+    [nc addObserverForName:UIApplicationWillEnterForegroundNotification object:nil queue:NSOperationQueue.mainQueue
+                usingBlock:^(NSNotification *n) { [gManager startUpdatingLocation]; }];
+    PALOG(@"[위치] 수신 시작 (포그라운드 전용)");
 }
 
 BOOL pkLocationGet(double *lat, double *lng) {

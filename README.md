@@ -24,6 +24,7 @@ Dependencies point downward only; each module has one reason to change.
 - **Fields are found by name** (`Layout.h`); the dump's offsets are a fallback only while the game build is unchanged. After a game update, unresolved fields fail closed and the scheduler pauses (`[layout]` lines in the log) instead of reading garbage.
 - **Hooks capture, passes act.** Production hooks never call back into il2cpp from a game callback. Request-logging hooks exist only with `pa_debug`.
 - **Every fire-and-forget request goes through `PKBackoff`** — no resend before the game can answer, longer waits when the target's state did not move.
+- **Foreground only.** Passes, the finder and the heartbeat run only while the app is active. Nothing in the tweak keeps the process alive in the background (no background location session); location updates stop when the app is backgrounded.
 - **One pass, one file, one status line.** Pacing lives only in `Features.mm` / `Scheduler.mm`.
 
 ## Switches (`defaults` on the app)

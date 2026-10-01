@@ -1,7 +1,7 @@
 // Where the game believes the player is: whatever CoreLocation (or a GPS
-// spoofing tweak underneath it) reports. Also the keep-alive: an active
-// background location session is what lets the process keep running with the
-// screen off.
+// spoofing tweak underneath it) reports. Foreground only: updates stop when the
+// app goes to the background and resume when it returns, and nothing here keeps
+// the process alive.
 #pragma once
 #import <Foundation/Foundation.h>
 

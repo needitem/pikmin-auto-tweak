@@ -11,7 +11,6 @@
 @property (nonatomic) NSTimeInterval pace;              // seconds between runs
 @property (nonatomic) BOOL inAuto;                      // part of the 자동성장 master switch
 @property (nonatomic) BOOL suppressCamera;              // keep the camera still while on
-@property (nonatomic) BOOL foregroundOnly;              // never runs while backgrounded
 @property (nonatomic, copy) NSString *(^run)(void);
 @property (nonatomic) NSTimeInterval lastRun;           // monotonic; scheduler-owned
 @property (nonatomic, readonly) BOOL enabled;
