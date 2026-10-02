@@ -17,18 +17,17 @@ static NSComparisonResult byHearts(PKPikmin *a, PKPikmin *b) {
 
 @interface PKTroopGroup : NSObject
 @property (nonatomic) int color;
-@property (nonatomic) BOOL build;                   // BUILD (to 4 hearts) or MASTER (to 8)
-@property (nonatomic) double weight;
 @property (nonatomic) double need;
-@property (nonatomic, copy) NSArray<PKPikmin *> *candidates;
-@property (nonatomic, copy) NSArray<PKPikmin *> *elite;
-@property (nonatomic) NSUInteger taken;
+@property (nonatomic, copy) NSArray<PKPikmin *> *elite;          // top quota by hearts
+@property (nonatomic, copy) NSArray<PKPikmin *> *decorLow;       // movable costume Pikmin under 4 hearts
+@property (nonatomic, copy) NSArray<PKPikmin *> *eliteCands;     // movable elite under 8 hearts, not already in decorLow
+@property (nonatomic) NSUInteger taken, takenDecor, takenElite;
 @end
 @implementation PKTroopGroup
 @end
 
 // One group per colour. `canMove` limits the candidates to Pikmin that can be
-// moved now; nil means everyone (the standing, not the plan for this moment).
+// moved now; nil means everyone.
 static NSArray<PKTroopGroup *> *makeGroups(NSArray<PKPikmin *> *roster, NSSet<NSString *> *canMove) {
     NSMutableDictionary<NSNumber *, NSMutableArray<PKPikmin *> *> *byColor = [NSMutableDictionary dictionary];
     for (PKPikmin *p in roster) {
@@ -45,15 +44,23 @@ static NSArray<PKTroopGroup *> *makeGroups(NSArray<PKPikmin *> *roster, NSSet<NS
         for (PKPikmin *p in all) if (p.hearts >= kHeartsRed) n4++;
         PKTroopGroup *g = [PKTroopGroup new];
         g.color = key.intValue;
-        g.build = n4 < quota;
-        float goal = g.build ? kHeartsRed : kHeartsFull;
+        g.need = (double)(quota - MIN(n4, quota)) / (double)MAX(quota, (NSUInteger)1);
         g.elite = [all subarrayWithRange:NSMakeRange(0, quota)];
-        NSMutableArray<PKPikmin *> *cands = [NSMutableArray array];
-        for (PKPikmin *p in g.elite)
-            if (p.hearts < goal && (!canMove || [canMove containsObject:p.pid])) [cands addObject:p];
-        g.candidates = cands;
-        g.need = g.build ? (double)(quota - n4) / (double)MAX(quota, (NSUInteger)1) : 0.0;
-        g.weight = !cands.count ? 0.0 : g.build ? 1.0 + (double)(quota - n4) / (double)quota : 1.0;
+
+        NSMutableArray<PKPikmin *> *low = [NSMutableArray array];
+        NSMutableSet<NSString *> *inLow = [NSMutableSet set];
+        for (PKPikmin *p in all)                                              // `all` is already hearts-descending
+            if (p.isDecor && p.hearts < kHeartsRed && (!canMove || [canMove containsObject:p.pid])) { [low addObject:p]; [inLow addObject:p.pid]; }
+        g.decorLow = low;
+        // Inside a colour: the elite still under 4 hearts first (so the colour
+        // really has a full quota at 4+), then the rest toward 8 — each part
+        // closest-to-goal first (`elite` is hearts-descending).
+        NSMutableArray<PKPikmin *> *under4 = [NSMutableArray array], *toEight = [NSMutableArray array];
+        for (PKPikmin *p in g.elite) {
+            if (p.hearts >= kHeartsFull || [inLow containsObject:p.pid] || (canMove && ![canMove containsObject:p.pid])) continue;
+            [(p.hearts < kHeartsRed ? under4 : toEight) addObject:p];
+        }
+        g.eliteCands = [under4 arrayByAddingObjectsFromArray:toEight];
         [groups addObject:g];
     }
     return groups;
@@ -65,14 +72,32 @@ NSDictionary<NSNumber *, NSNumber *> *pkColorNeed(NSArray<PKPikmin *> *roster) {
     return out;
 }
 
-void pkTroopStanding(NSArray<PKPikmin *> *roster, NSSet<NSString *> **elite, NSSet<NSString *> **training) {
-    NSMutableSet<NSString *> *e = [NSMutableSet set], *t = [NSMutableSet set];
-    for (PKTroopGroup *g in makeGroups(roster, nil)) {
-        for (PKPikmin *p in g.elite) [e addObject:p.pid];
-        for (PKPikmin *p in g.candidates) [t addObject:p.pid];
+NSSet<NSString *> *pkTroopElite(NSArray<PKPikmin *> *roster) {
+    NSMutableSet<NSString *> *e = [NSMutableSet set];
+    for (PKTroopGroup *g in makeGroups(roster, nil)) for (PKPikmin *p in g.elite) [e addObject:p.pid];
+    return e;
+}
+
+// Hand out places from the groups' lists, each time to the colour that has
+// received the fewest so far for its weight (ties: the lower colour id).
+// Counting every place a colour got — decor and elite together — keeps the
+// colours level overall; the weight tips it toward colours still short of 40.
+static void serve(NSArray<PKTroopGroup *> *groups, NSArray<PKPikmin *> *(^list)(PKTroopGroup *),
+                  BOOL decorPhase, NSMutableArray<PKPikmin *> *chosen, NSMutableSet<NSString *> *chosenIds, NSUInteger slots) {
+    while (chosen.count < slots) {
+        PKTroopGroup *best = nil;
+        for (PKTroopGroup *g in groups) {
+            NSUInteger used = decorPhase ? g.takenDecor : g.takenElite;
+            if (used >= list(g).count) continue;
+            // places received, per unit of weight: a colour short of its quota at 4
+            // hearts (need up to 1) is served up to twice as often as a full one
+            if (!best || (double)g.taken / (1.0 + g.need) < (double)best.taken / (1.0 + best.need)) best = g;
+        }
+        if (!best) break;
+        PKPikmin *p = list(best)[decorPhase ? best.takenDecor++ : best.takenElite++];
+        best.taken++;
+        [chosen addObject:p]; [chosenIds addObject:p.pid];
     }
-    if (elite) *elite = e;
-    if (training) *training = t;
 }
 
 NSArray<PKPikmin *> *pkTroopPlan(NSArray<PKPikmin *> *roster, NSArray<PKPikmin *> *movable,
@@ -81,20 +106,10 @@ NSArray<PKPikmin *> *pkTroopPlan(NSArray<PKPikmin *> *roster, NSArray<PKPikmin *
     for (PKPikmin *p in movable) [canMove addObject:p.pid];
     NSArray<PKTroopGroup *> *groups = makeGroups(roster, canMove);
 
-    // D'Hondt: each place goes to the group with the best weight / (places + 1).
     NSMutableArray<PKPikmin *> *chosen = [NSMutableArray array];
     NSMutableSet<NSString *> *chosenIds = [NSMutableSet set];
-    while (chosen.count < slots) {
-        PKTroopGroup *best = nil; double bestScore = 0;
-        for (PKTroopGroup *g in groups) {
-            if (g.taken >= g.candidates.count || g.weight <= 0) continue;
-            double score = g.weight / (double)(g.taken + 1);
-            if (score > bestScore) { best = g; bestScore = score; }        // ties: the lower colour id
-        }
-        if (!best) break;
-        PKPikmin *p = best.candidates[best.taken++];
-        [chosen addObject:p]; [chosenIds addObject:p.pid];
-    }
+    serve(groups, ^NSArray<PKPikmin *> *(PKTroopGroup *g) { return g.decorLow; }, YES, chosen, chosenIds, slots);     // 1. decor under 4
+    serve(groups, ^NSArray<PKPikmin *> *(PKTroopGroup *g) { return g.eliteCands; }, NO, chosen, chosenIds, slots);    // 2. elite toward 8
 
     // Nobody above wants the rest of the places: the best of whoever is left,
     // maxed Pikmin last (walking gains them nothing).
@@ -113,7 +128,7 @@ NSArray<PKPikmin *> *pkTroopPlan(NSArray<PKPikmin *> *roster, NSArray<PKPikmin *
     if (summary) {
         NSMutableArray *bits = [NSMutableArray array];
         for (PKTroopGroup *g in groups)
-            if (g.taken) [bits addObject:[NSString stringWithFormat:@"%@ %lu→%d", @(colorName(g.color)), (unsigned long)g.taken, g.build ? 4 : 8]];
+            if (g.taken) [bits addObject:[NSString stringWithFormat:@"%@ 데코%lu·정예%lu", @(colorName(g.color)), (unsigned long)g.takenDecor, (unsigned long)g.takenElite]];
         [bits addObject:[NSString stringWithFormat:@"기타 %lu", (unsigned long)(chosen.count - planned)]];
         *summary = [bits componentsJoinedByString:@", "];
     }

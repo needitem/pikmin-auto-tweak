@@ -30,10 +30,12 @@ static NSArray<PKPikmin *> *legacyPlan(NSArray<PKPikmin *> *elig, NSUInteger slo
 
 static void census(NSArray<PKPikmin *> *all, const char *title) {
     int n4[9] = {0}, n8[9] = {0}, tot[9] = {0};
+    int dl = 0;
+    for (PKPikmin *p in all) if (p.isDecor && p.hearts < 4) dl++;
     for (PKPikmin *p in all) { int c = (p.color >= 1 && p.color <= 8) ? p.color : 0; tot[c]++; if (p.hearts >= 4) n4[c]++; if (p.hearts >= 8) n8[c]++; }
     printf("  %-9s", title);
     for (int c = 1; c <= 8; c++) printf(" %s %2d/%d", kNames[c], n4[c], n8[c]);
-    printf("\n");
+    printf(" | 데코<4 %d\n", dl);
 }
 
 int main(int argc, const char *argv[]) {
@@ -66,14 +68,16 @@ int main(int argc, const char *argv[]) {
             printf(" | 평균 하트 %.2f, 2하트 미만 %d마리, 데코 %d마리\n", sum / sel.count, low, decor);
         }
 
-        // Who the expedition pass may send (it keeps the training elite home, sends the rest strongest-first).
-        NSSet<NSString *> *elite = nil, *training = nil;
-        pkTroopStanding(all, &elite, &training);
-        int plainN = 0, spareN = 0, trainN = 0, trainBusy = 0;
-        for (PKPikmin *p in movable) { if ([training containsObject:p.pid]) trainN++; else if ([elite containsObject:p.pid]) spareN++; else plainN++; }
-        for (PKPikmin *p in all) if (p.status == 2 && [training containsObject:p.pid]) trainBusy++;
-        printf("\n[탐험 후보] 이동 가능 %lu마리 중 일반 %d · 정예(목표 달성) %d · 육성 대상 %d(제외) — 육성 대상 중 이미 작업중 %d\n",
-               (unsigned long)movable.count, plainN, spareN, trainN, trainBusy);
+        // Who the expedition pass may send: not the ones the plan wants in the troop; elite last.
+        NSSet<NSString *> *elite = pkTroopElite(all);
+        NSMutableSet<NSString *> *wanted = [NSMutableSet set];
+        for (PKPikmin *p in neu) [wanted addObject:p.pid];
+        int plainN = 0, spareN = 0, heldN = 0;
+        for (PKPikmin *p in movable) { if ([wanted containsObject:p.pid]) heldN++; else if ([elite containsObject:p.pid]) spareN++; else plainN++; }
+        int decorLow = 0;
+        for (PKPikmin *p in all) if (p.isDecor && p.hearts < 4) decorLow++;
+        printf("\n[참고] 데코 중 4하트 미만 %d마리\n[탐험 후보] 이동 가능 %lu마리 중 일반 %d · 정예 %d · 부대 배정 %d(제외)\n",
+               decorLow, (unsigned long)movable.count, plainN, spareN, heldN);
 
         // Replay: every troop member gains the same hearts each round (assumption).
         const float gain = 0.02f;
