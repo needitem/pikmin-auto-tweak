@@ -19,6 +19,7 @@ static NSComparisonResult byHearts(PKPikmin *a, PKPikmin *b) {
 @property (nonatomic) int color;
 @property (nonatomic) BOOL build;                   // BUILD (to 4 hearts) or MASTER (to 8)
 @property (nonatomic) double weight;
+@property (nonatomic) double need;
 @property (nonatomic, copy) NSArray<PKPikmin *> *candidates;
 @property (nonatomic, copy) NSArray<PKPikmin *> *elite;
 @property (nonatomic) NSUInteger taken;
@@ -51,10 +52,17 @@ static NSArray<PKTroopGroup *> *makeGroups(NSArray<PKPikmin *> *roster, NSSet<NS
         for (PKPikmin *p in g.elite)
             if (p.hearts < goal && (!canMove || [canMove containsObject:p.pid])) [cands addObject:p];
         g.candidates = cands;
+        g.need = g.build ? (double)(quota - n4) / (double)MAX(quota, (NSUInteger)1) : 0.0;
         g.weight = !cands.count ? 0.0 : g.build ? 1.0 + (double)(quota - n4) / (double)quota : 1.0;
         [groups addObject:g];
     }
     return groups;
+}
+
+NSDictionary<NSNumber *, NSNumber *> *pkColorNeed(NSArray<PKPikmin *> *roster) {
+    NSMutableDictionary *out = [NSMutableDictionary dictionary];
+    for (PKTroopGroup *g in makeGroups(roster, nil)) out[@(g.color)] = @(g.need);
+    return out;
 }
 
 void pkTroopStanding(NSArray<PKPikmin *> *roster, NSSet<NSString *> **elite, NSSet<NSString *> **training) {

@@ -6,6 +6,7 @@
 #import "Layout.h"
 #import "Log.h"
 #import "Probe.h"
+#import "SeedValue.h"
 #import "Roster.h"
 #import "Troop.h"
 #import "TroopPlan.h"
@@ -111,6 +112,29 @@ static NSArray<PKPikmin *> *candidates(NSArray<PKPikmin *> *roster) {
     return out;
 }
 
+// What an expedition is worth, lower = start first (the pass launches only a
+// few per run and they share the same candidates):
+//   0 special seedling, 1 large seedling,
+//   2 anything else (gifts, fruit, big flowers, and ordinary seedlings of a
+//     colour the roster still wants),
+//   3 ordinary seedlings of a colour it already has enough of.
+// Nothing is skipped; this only decides the order.
+static int expeditionTier(void *d, NSDictionary<NSNumber *, NSNumber *> *need) {
+    static int seedTarget = -2;
+    if (seedTarget == -2) {
+        seedTarget = -1;
+        NSString *ns = nil;
+        NSDictionary<NSNumber *, NSString *> *m = pkEnumMap(pkFindClassByName("TargetCase", &ns));
+        for (NSNumber *k in m) if ([m[k] isEqualToString:@"Seed"]) seedTarget = k.intValue;
+    }
+    if (seedTarget < 0 || pkUnboxInt(pkCall0(d, "get_Target")) != seedTarget) return 2;
+    void *seed = pkCall0(d, "get_PikminSeed");
+    if (!seed) return 2;
+    PKSeedTraits t = pkSeedTraits(seed);
+    if (t.tier != PKSeedTierPlain) return t.tier;
+    return need[@(t.color)].doubleValue > 0 ? 2 : 3;
+}
+
 NSString *pkExpeditionPass(void) {
     if (!pkExpStore()) {
         PKLOGC(@"exp.nostore", @"[탐험] 스토어 미포착 — 지도에 탐험이 뜨면 잡힘");
@@ -139,6 +163,21 @@ NSString *pkExpeditionPass(void) {
                             (unsigned long)exps.count, nExp, nIdle]));
 
     NSArray<PKPikmin *> *roster = pkRoster();
+    {   // Best-value expeditions first (stable inside a tier).
+        NSDictionary<NSNumber *, NSNumber *> *need = pkColorNeed(roster);
+        NSMutableArray<NSNumber *> *tiers = [NSMutableArray array];
+        for (NSValue *ev in exps) [tiers addObject:@(expeditionTier(ev.pointerValue, need))];
+        NSMutableArray<NSNumber *> *order = [NSMutableArray array];
+        for (NSUInteger i = 0; i < exps.count; i++) [order addObject:@(i)];
+        [order sortUsingComparator:^NSComparisonResult(NSNumber *a, NSNumber *b) {
+            int ta = tiers[a.unsignedIntegerValue].intValue, tb = tiers[b.unsignedIntegerValue].intValue;
+            if (ta != tb) return ta < tb ? NSOrderedAscending : NSOrderedDescending;
+            return [a compare:b];
+        }];
+        NSMutableArray<NSValue *> *sorted = [NSMutableArray array];
+        for (NSNumber *i in order) [sorted addObject:exps[i.unsignedIntegerValue]];
+        exps = sorted;
+    }
     NSArray<PKPikmin *> *cands = roster.count ? candidates(roster) : nil;
     if (!cands.count) return @"보낼 피크민 없음";
 

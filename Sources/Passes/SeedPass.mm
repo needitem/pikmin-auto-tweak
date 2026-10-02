@@ -6,6 +6,9 @@
 #import "Location.h"
 #import "Log.h"
 #import "Probe.h"
+#import "Roster.h"
+#import "SeedValue.h"
+#import "TroopPlan.h"
 #import "RpcClient.h"
 
 // Plant seedlings into free planter slots and pluck the ripe ones.
@@ -16,6 +19,7 @@
 @property (nonatomic, copy) NSString *sid;
 @property (nonatomic) int req, cur, bonus;
 @property (nonatomic) double blat, blng;
+@property (nonatomic) PKSeedTraits traits;
 @end
 @implementation PKSeed
 @end
@@ -48,6 +52,7 @@ NSString *pkSeedPass(void) {
         [protos addObject:[NSValue valueWithPointer:proto]];
         PKSeed *s = [PKSeed new];
         s.sid = sid;
+        s.traits = pkSeedTraits(proto);
         s.req = pkGetInt(proto, &F_Seed_req);
         s.bonus = (int)pkGetF32(proto, &F_Seed_bonus);
         s.cur = pkGetInt(proto, &F_Seed_cur) + s.bonus;
@@ -101,14 +106,21 @@ NSString *pkSeedPass(void) {
     });
     PKLOGC(@"seed.planters", ([NSString stringWithFormat:@"[모종] 화분%d 슬롯%d 빈%d | %@", nPlanters, nSlots, nFree, dbg]));
 
-    // 3) Fill free slots with the seedlings that ripen soonest (every pass:
-    // planting is reliable now, and one-per-pass starved the pluck→drain cycle).
+    // 3) Fill free slots, best seedlings first (every pass: planting is reliable
+    // now, and one-per-pass starved the pluck→drain cycle). What "best" means is
+    // in Model/SeedValue.h: special, then large, then ordinary ones of a colour
+    // the roster still wants, and within that the soonest to ripen.
     int set = 0;
     if (nFree && waiting.count) {
+        NSDictionary<NSNumber *, NSNumber *> *need = pkColorNeed(pkRoster());
         [waiting sortUsingComparator:^NSComparisonResult(PKSeed *a, PKSeed *b) {
-            if (a.req != b.req) return a.req < b.req ? NSOrderedAscending : NSOrderedDescending;
-            return [a.sid compare:b.sid];
+            NSComparisonResult r = pkSeedCompare(a.traits, b.traits, need);
+            return r != NSOrderedSame ? r : [a.sid compare:b.sid];
         }];
+        int nSpecial = 0, nLarge = 0;
+        for (PKSeed *s in waiting) { if (s.traits.tier == PKSeedTierSpecial) nSpecial++; else if (s.traits.tier == PKSeedTierLarge) nLarge++; }
+        PKLOGC(@"seed.rank", ([NSString stringWithFormat:@"[모종] 심을 후보 %lu (특수 %d · 큰 %d · 일반 %lu), 슬롯 %d", (unsigned long)waiting.count,
+                               nSpecial, nLarge, (unsigned long)waiting.count - nSpecial - nLarge, nFree]));
         double clat = 0, clng = 0;
         BOOL haveLoc = pkLocationGet(&clat, &clng);
         for (PKSeed *s in waiting) {
@@ -121,7 +133,8 @@ NSString *pkSeedPass(void) {
             }
             if (pkRpcSetSeed(s.sid, lat, lng)) {
                 [backoff() recordSend:s.sid];
-                PALOG(@"[모종] 심기 id=%@ req=%d point=(%.6f,%.6f)", s.sid, s.req, lat, lng);
+                PALOG(@"[모종] 심기 id=%@ 종류=%d(%@) 색=%d req=%d point=(%.6f,%.6f)", s.sid, s.traits.seedType,
+                      s.traits.tier == PKSeedTierSpecial ? @"특수" : s.traits.tier == PKSeedTierLarge ? @"큰" : @"일반", s.traits.color, s.req, lat, lng);
                 set++;
             }
         }

@@ -26,6 +26,11 @@ extern const int kTroopEliteQuota;     // elite per colour
 // use it to leave those Pikmin alone.
 void pkTroopStanding(NSArray<PKPikmin *> *roster, NSSet<NSString *> **elite, NSSet<NSString *> **training);
 
+// Per colour, how much the roster still wants more Pikmin of it, 0..1: the share
+// of its elite quota still missing at 4 hearts. A colour already at its quota
+// (training the elite to 8) wants none — more ordinary Pikmin of it add nothing.
+NSDictionary<NSNumber *, NSNumber *> *pkColorNeed(NSArray<PKPikmin *> *roster);
+
 // `roster`: every Pikmin owned (it defines each colour's standing).
 // `movable`: the ones that may be moved right now (not on a task).
 // `slots`: troop places available to them.
