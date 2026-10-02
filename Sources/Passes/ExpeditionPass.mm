@@ -134,26 +134,53 @@ NSString *pkExpeditionPass(void) {
         if (maxN <= 0) continue;
         void *mAllows = pkMethodOf(d, "Allows", 1);
 
+        // Decide the party in OUR memory first, then touch the game's task as
+        // little as possible. The task object is live game state (a panel may be
+        // showing it), and the old loop rewrote its party and recomputed its
+        // cached stats once per candidate — dozens of writes per task, undone
+        // again when the party was too weak. Now:
+        //   1) the eligible candidates are collected with read-only calls;
+        //   2) one write tries the largest party the task allows — if the game
+        //      says even that cannot start, nothing smaller can, and the task is
+        //      put back with a single restore;
+        //   3) otherwise the smallest party that works is found by bisection
+        //      (adding Pikmin never lowers carrying power), a handful of writes.
         NSArray<NSString *> *original = pkExpeditionParty(d);     // whatever the game (or the player) had there
-        NSMutableArray<NSString *> *picked = [NSMutableArray array];
-        BOOL ready = NO;
+        NSMutableArray<PKPikmin *> *elig = [NSMutableArray array];
         for (PKPikmin *c in cands) {
-            if ((int)picked.count >= maxN) break;
+            if ((int)elig.count >= maxN) break;
             if ([committed containsObject:c.pid]) continue;
             if (mAllows) {
                 void *a[1] = { c.item };
                 if (!pkUnboxBool(pkInvoke(mAllows, d, a))) continue;      // restricted task
             }
-            [picked addObject:c.pid];
-            if (picked.count == 1) pkExpeditionSetParty(d, picked); else pkExpeditionAddToParty(d, c.pid);
-            // CanTryStart == !Started && CarryingPower >= Weight, recomputed by the game.
-            if (pkUnboxBool(pkCall0(d, "get_CanTryStart"))) { ready = YES; break; }
+            [elig addObject:c];
         }
+        if (!elig.count) continue;                                        // nothing to write
+        NSMutableArray<NSString *> *eligIds = [NSMutableArray arrayWithCapacity:elig.count];
+        for (PKPikmin *c in elig) [eligIds addObject:c.pid];
+        // CanTryStart == !Started && CarryingPower >= Weight, recomputed by the game.
+        BOOL (^canStartWith)(NSUInteger) = ^BOOL(NSUInteger n) {
+            pkExpeditionSetParty(d, [eligIds subarrayWithRange:NSMakeRange(0, n)]);
+            return pkUnboxBool(pkCall0(d, "get_CanTryStart"));
+        };
+        BOOL ready = canStartWith(elig.count);
+        NSUInteger want = elig.count;
+        if (ready) {
+            NSUInteger lo = 1, hi = elig.count;                           // smallest n in [lo, hi] that starts
+            while (lo < hi) {
+                NSUInteger mid = (lo + hi) / 2;
+                if (canStartWith(mid)) hi = mid; else lo = mid + 1;
+            }
+            want = lo;
+            if (want != elig.count) ready = canStartWith(want);           // leave the task holding exactly this party
+        }
+        NSArray<NSString *> *picked = [eligIds subarrayWithRange:NSMakeRange(0, want)];
         if (!ready) {
             pkExpeditionSetParty(d, original);
             if (tkey) [refused() recordSend:tkey];
-            PKLOGC(@"exp.weak", ([NSString stringWithFormat:@"[탐험] 힘 부족 — 후보 %lu, 뽑음 %lu, 최대 %d",
-                                  (unsigned long)cands.count, (unsigned long)picked.count, maxN]));
+            PKLOGC(@"exp.weak", ([NSString stringWithFormat:@"[탐험] 힘 부족 — 후보 %lu, 가능 %lu, 최대 %d",
+                                  (unsigned long)cands.count, (unsigned long)elig.count, maxN]));
             continue;
         }
         // With a party assigned, the game's own veto is meaningful: out of range,

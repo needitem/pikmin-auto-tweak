@@ -18,4 +18,3 @@ NSSet<NSString *> *pkReturnedExpeditionIds(void);
 // game's Start builds its request from it).
 NSArray<NSString *> *pkExpeditionParty(void *data);
 void pkExpeditionSetParty(void *data, NSArray<NSString *> *pids);
-void pkExpeditionAddToParty(void *data, NSString *pid);

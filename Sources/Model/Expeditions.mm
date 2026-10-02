@@ -61,10 +61,3 @@ void pkExpeditionSetParty(void *d, NSArray<NSString *> *pids) {
     for (NSString *pid in pids) pkRepeatedAdd(rf, pkNewString(pid));
     pkInvoke(pkMethodOf(d, "InvalidateAllCachedValues", 0), d, NULL);
 }
-
-void pkExpeditionAddToParty(void *d, NSString *pid) {
-    void *rf = pkGetPtr(pkExpeditionTaskProto(d), &F_Task_pikmin);
-    if (!rf) return;
-    pkRepeatedAdd(rf, pkNewString(pid));
-    pkInvoke(pkMethodOf(d, "InvalidateAllCachedValues", 0), d, NULL);
-}
