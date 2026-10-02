@@ -14,7 +14,7 @@
 // PikminUtils.GetPikminInTroopCountMax (level-based).
 //
 // WHICH Pikmin is decided by Model/TroopPlan.mm (decor under 4 hearts first,
-// then each colour's elite toward 8; read its header for the rules). This pass only
+// then each colour's elite toward 7; read its header for the rules). This pass only
 // applies the plan: the ideal set is recomputed every pass and SWAPPED in —
 // members outside it move out, missing ones move in. The arrange RPC is async
 // and the in-troop read lags a pass or two, so a Pikmin is not moved again

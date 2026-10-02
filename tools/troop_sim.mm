@@ -32,7 +32,7 @@ static void census(NSArray<PKPikmin *> *all, const char *title) {
     int n4[9] = {0}, n8[9] = {0}, tot[9] = {0};
     int dl = 0;
     for (PKPikmin *p in all) if (p.isDecor && p.hearts < 4) dl++;
-    for (PKPikmin *p in all) { int c = (p.color >= 1 && p.color <= 8) ? p.color : 0; tot[c]++; if (p.hearts >= 4) n4[c]++; if (p.hearts >= 8) n8[c]++; }
+    for (PKPikmin *p in all) { int c = (p.color >= 1 && p.color <= 8) ? p.color : 0; tot[c]++; if (p.hearts >= 4) n4[c]++; if (p.hearts >= 7) n8[c]++; }
     printf("  %-9s", title);
     for (int c = 1; c <= 8; c++) printf(" %s %2d/%d", kNames[c], n4[c], n8[c]);
     printf(" | 데코<4 %d\n", dl);
@@ -81,7 +81,7 @@ int main(int argc, const char *argv[]) {
 
         // Replay: every troop member gains the same hearts each round (assumption).
         const float gain = 0.02f;
-        printf("\n[재생] 라운드마다 부대원 +%.2f 하트(가정). 각 칸은 '4하트 이상 / 8하트' 마릿수\n", gain);
+        printf("\n[재생] 라운드마다 부대원 +%.2f 하트(가정). 각 칸은 '4하트 이상 / 7하트 이상' 마릿수\n", gain);
         for (int pass = 0; pass < 2; pass++) {
             NSMutableArray<PKPikmin *> *sim = [NSMutableArray array];
             for (PKPikmin *p in all) { PKPikmin *q = [PKPikmin new]; q.pid = p.pid; q.color = p.color; q.hearts = p.hearts; q.asset = p.asset; q.status = p.status; [sim addObject:q]; }

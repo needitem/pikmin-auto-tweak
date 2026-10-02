@@ -2,7 +2,9 @@
 #import "GameConstants.h"
 
 const int kTroopEliteQuota = 40;
-static const float kHeartsFull = 8.0f;          // yellow hearts maxed
+// Training stops here: a Pikmin at 7 hearts or more is done and no longer
+// takes a troop place (the game's cap is 8, but the last heart is not worth one).
+static const float kHeartsDone = 7.0f;
 static const float kHeartsRed = PK_HEARTS_TARGET;   // the red maximum: 4
 
 static const char *const kColorNames[9] = { "미상", "빨강", "파랑", "노랑", "하양", "보라", "바위", "날개", "얼음" };
@@ -20,7 +22,7 @@ static NSComparisonResult byHearts(PKPikmin *a, PKPikmin *b) {
 @property (nonatomic) double need;
 @property (nonatomic, copy) NSArray<PKPikmin *> *elite;          // top quota by hearts
 @property (nonatomic, copy) NSArray<PKPikmin *> *decorLow;       // movable costume Pikmin under 4 hearts
-@property (nonatomic, copy) NSArray<PKPikmin *> *eliteCands;     // movable elite under 8 hearts, not already in decorLow
+@property (nonatomic, copy) NSArray<PKPikmin *> *eliteCands;     // movable elite under 7 hearts, not already in decorLow
 @property (nonatomic) NSUInteger taken, takenDecor, takenElite;
 @end
 @implementation PKTroopGroup
@@ -53,11 +55,11 @@ static NSArray<PKTroopGroup *> *makeGroups(NSArray<PKPikmin *> *roster, NSSet<NS
             if (p.isDecor && p.hearts < kHeartsRed && (!canMove || [canMove containsObject:p.pid])) { [low addObject:p]; [inLow addObject:p.pid]; }
         g.decorLow = low;
         // Inside a colour: the elite still under 4 hearts first (so the colour
-        // really has a full quota at 4+), then the rest toward 8 — each part
+        // really has a full quota at 4+), then the rest toward 7 — each part
         // closest-to-goal first (`elite` is hearts-descending).
         NSMutableArray<PKPikmin *> *under4 = [NSMutableArray array], *toEight = [NSMutableArray array];
         for (PKPikmin *p in g.elite) {
-            if (p.hearts >= kHeartsFull || [inLow containsObject:p.pid] || (canMove && ![canMove containsObject:p.pid])) continue;
+            if (p.hearts >= kHeartsDone || [inLow containsObject:p.pid] || (canMove && ![canMove containsObject:p.pid])) continue;
             [(p.hearts < kHeartsRed ? under4 : toEight) addObject:p];
         }
         g.eliteCands = [under4 arrayByAddingObjectsFromArray:toEight];
@@ -109,16 +111,16 @@ NSArray<PKPikmin *> *pkTroopPlan(NSArray<PKPikmin *> *roster, NSArray<PKPikmin *
     NSMutableArray<PKPikmin *> *chosen = [NSMutableArray array];
     NSMutableSet<NSString *> *chosenIds = [NSMutableSet set];
     serve(groups, ^NSArray<PKPikmin *> *(PKTroopGroup *g) { return g.decorLow; }, YES, chosen, chosenIds, slots);     // 1. decor under 4
-    serve(groups, ^NSArray<PKPikmin *> *(PKTroopGroup *g) { return g.eliteCands; }, NO, chosen, chosenIds, slots);    // 2. elite toward 8
+    serve(groups, ^NSArray<PKPikmin *> *(PKTroopGroup *g) { return g.eliteCands; }, NO, chosen, chosenIds, slots);    // 2. elite toward 7
 
     // Nobody above wants the rest of the places: the best of whoever is left,
-    // maxed Pikmin last (walking gains them nothing).
+    // finished Pikmin (7+ hearts) last (walking gains them little).
     NSUInteger planned = chosen.count;
     if (chosen.count < slots) {
         NSMutableArray<PKPikmin *> *rest = [NSMutableArray array];
         for (PKPikmin *p in movable) if (![chosenIds containsObject:p.pid]) [rest addObject:p];
         [rest sortUsingComparator:^NSComparisonResult(PKPikmin *a, PKPikmin *b) {
-            BOOL ma = a.hearts >= kHeartsFull, mb = b.hearts >= kHeartsFull;
+            BOOL ma = a.hearts >= kHeartsDone, mb = b.hearts >= kHeartsDone;
             if (ma != mb) return ma ? NSOrderedDescending : NSOrderedAscending;
             return byHearts(a, b);
         }];

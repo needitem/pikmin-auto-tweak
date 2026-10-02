@@ -8,12 +8,13 @@
 //  1. DECOR first: a costume Pikmin still under 4 hearts, whatever its colour.
 //  2. Then the ELITE of every colour — its top kTroopEliteQuota Pikmin by
 //     hearts. Inside a colour, the elite still under 4 hearts come first (so
-//     the colour really has a full quota at 4+), then the others toward 8
-//     hearts; each part closest-to-goal first. Colours are served evenly (a
+//     the colour really has a full quota at 4+), then the others toward 7
+//     hearts; each part closest-to-goal first. At 7 hearts a Pikmin is done and
+//     no longer takes a place. Colours are served evenly (a
 //     place goes to the colour that has received the fewest so far, a colour
 //     short of its quota at 4 hearts counting up to double), so every colour
 //     builds its quota instead of one colour racing ahead.
-//  3. Anyone else only fills places nobody above wants (maxed Pikmin last).
+//  3. Anyone else only fills places nobody above wants (finished Pikmin last).
 #pragma once
 #import <Foundation/Foundation.h>
 #import "Roster.h"
