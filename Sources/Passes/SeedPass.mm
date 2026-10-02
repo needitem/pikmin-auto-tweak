@@ -5,6 +5,7 @@
 #import "Layout.h"
 #import "Location.h"
 #import "Log.h"
+#import "Probe.h"
 #import "RpcClient.h"
 
 // Plant seedlings into free planter slots and pluck the ripe ones.
@@ -42,6 +43,7 @@ NSString *pkSeedPass(void) {
         if (!proto || !sid.length) return;
         nSeeds++;
         [alive addObject:sid];
+        if (nSeeds == 1) pkProbeSeedItem(item);
         PKSeed *s = [PKSeed new];
         s.sid = sid;
         s.req = pkGetInt(proto, &F_Seed_req);

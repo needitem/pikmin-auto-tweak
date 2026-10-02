@@ -40,6 +40,10 @@ typedef void*        (*t_class_from_type)(const void*);
 typedef bool         (*t_class_is_valuetype)(const void*);
 typedef void*        (*t_class_get_parent)(void*);
 typedef const char*  (*t_field_get_name)(void*);
+typedef size_t       (*t_image_get_class_count)(const void*);
+typedef const void*  (*t_image_get_class)(const void*, size_t);
+typedef const char*  (*t_class_get_namespace)(void*);
+typedef const void*  (*t_method_get_return_type)(const void*);
 
 static t_domain_get f_domain_get;
 static t_thread_attach f_thread_attach;
@@ -74,6 +78,10 @@ static t_class_from_type f_class_from_type;
 static t_class_is_valuetype f_class_is_valuetype;
 static t_class_get_parent f_class_get_parent;
 static t_field_get_name f_field_get_name;
+static t_image_get_class_count f_image_get_class_count;
+static t_image_get_class f_image_get_class;
+static t_class_get_namespace f_class_get_namespace;
+static t_method_get_return_type f_method_get_return_type;
 
 static void *gUnity = NULL;
 #define SYM(v, name) v = (decltype(v))dlsym(gUnity ? gUnity : RTLD_DEFAULT, name)
@@ -147,6 +155,10 @@ BOOL pkRuntimeReady(void) {
     SYM(f_class_is_valuetype, "il2cpp_class_is_valuetype");
     SYM(f_class_get_parent, "il2cpp_class_get_parent");
     SYM(f_field_get_name, "il2cpp_field_get_name");
+    SYM(f_image_get_class_count, "il2cpp_image_get_class_count");
+    SYM(f_image_get_class, "il2cpp_image_get_class");
+    SYM(f_class_get_namespace, "il2cpp_class_get_namespace");
+    SYM(f_method_get_return_type, "il2cpp_method_get_return_type");
     done = f_domain_get && f_domain_get_assemblies && f_assembly_get_image &&
            f_class_from_name && f_class_get_method_from_name &&
            f_class_get_field_from_name && f_field_get_offset && f_object_new &&
@@ -386,6 +398,62 @@ void pkEachRefField(void *obj, void (^fn)(void *child)) {
             if (child) fn(child);
         }
     }
+}
+
+void *pkFindClassByName(const char *name, NSString **ns) {
+    if (!name || !f_domain_get || !f_image_get_class_count || !f_image_get_class || !f_class_get_name) return NULL;
+    ensureAttached();
+    void *dom = f_domain_get();
+    if (!dom) return NULL;
+    size_t n = 0; void **as = f_domain_get_assemblies(dom, &n);
+    for (size_t i = 0; i < n; i++) {
+        const void *im = f_assembly_get_image(as[i]);
+        if (!im) continue;
+        size_t count = f_image_get_class_count(im);
+        for (size_t c = 0; c < count; c++) {
+            void *k = (void *)f_image_get_class(im, c);
+            const char *kn = k ? f_class_get_name(k) : NULL;
+            if (kn && !strcmp(kn, name)) {
+                if (ns) *ns = f_class_get_namespace ? @(f_class_get_namespace(k) ?: "") : @"";
+                return k;
+            }
+        }
+    }
+    return NULL;
+}
+
+static NSString *typeText(const void *t) {
+    if (!t || !f_type_get_name) return @"?";
+    char *n = f_type_get_name(t);
+    NSString *s = n ? @(n) : @"?";
+    if (n && f_free) f_free(n);
+    return s;
+}
+
+NSString *pkDescribeClass(void *cls) {
+    if (!cls || !f_class_get_name) return @"(no class)";
+    void *parent = f_class_get_parent ? f_class_get_parent(cls) : NULL;
+    NSMutableString *out = [NSMutableString stringWithFormat:@"%s.%s : %s", f_class_get_namespace ? f_class_get_namespace(cls) : "",
+                            f_class_get_name(cls), parent ? f_class_get_name(parent) : "-"];
+    [out appendString:@" | fields:"];
+    if (f_class_get_fields && f_field_get_name && f_field_get_type) {
+        void *it = NULL, *fld; int n = 0;
+        while ((fld = f_class_get_fields(cls, &it)) && n++ < 120)
+            [out appendFormat:@" %s%s@0x%zx:%@;", (f_field_get_flags && (f_field_get_flags(fld) & 0x10)) ? "static " : "",
+             f_field_get_name(fld) ?: "?", (size_t)f_field_get_offset(fld), typeText(f_field_get_type(fld))];
+    }
+    [out appendString:@" | methods:"];
+    if (f_class_get_methods && f_method_get_name && f_method_get_param_count) {
+        void *it = NULL, *m; int n = 0;
+        while ((m = f_class_get_methods(cls, &it)) && n++ < 160) {
+            NSMutableArray *ps = [NSMutableArray array];
+            uint32_t pc = f_method_get_param_count(m);
+            for (uint32_t i = 0; i < pc && f_method_get_param; i++) [ps addObject:typeText(f_method_get_param(m, i))];
+            [out appendFormat:@" %@ %s(%@);", f_method_get_return_type ? typeText(f_method_get_return_type(m)) : @"?",
+             f_method_get_name(m) ?: "?", [ps componentsJoinedByString:@","]];
+        }
+    }
+    return out;
 }
 
 NSString *pkDescribeFields(void *cls) {

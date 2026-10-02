@@ -21,6 +21,11 @@
 
 extern const int kTroopEliteQuota;     // elite per colour
 
+// Who is elite, and which of the elite still want troop slots (the ones the
+// plan would train), irrespective of who can be moved right now. Other passes
+// use it to leave those Pikmin alone.
+void pkTroopStanding(NSArray<PKPikmin *> *roster, NSSet<NSString *> **elite, NSSet<NSString *> **training);
+
 // `roster`: every Pikmin owned (it defines each colour's standing).
 // `movable`: the ones that may be moved right now (not on a task).
 // `slots`: troop places available to them.

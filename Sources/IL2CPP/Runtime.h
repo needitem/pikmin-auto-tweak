@@ -59,6 +59,14 @@ void *pkRefFieldOffsetByName(void *cls, const char *name, ptrdiff_t *off);
 // logs that explain a layout we could not match.
 NSString *pkDescribeFields(void *cls);
 
+// A class by its simple name alone (any namespace, any assembly); the namespace
+// comes back in `ns`. Walks every class once per distinct name, so it is for
+// diagnostics, not for passes.
+void *pkFindClassByName(const char *name, NSString **ns);
+// "ns.Name : Parent | fields | methods", declared members only, with types and
+// method signatures. For logs that explain a layout or an API we cannot read yet.
+NSString *pkDescribeClass(void *cls);
+
 // Reflection over overloads (used to tell apart same-arity overloads).
 void pkEachMethod(void *cls, void (^fn)(void *method, const char *name, int argc));
 NSString *pkParamTypeName(void *method, int index);

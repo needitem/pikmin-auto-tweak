@@ -66,6 +66,15 @@ int main(int argc, const char *argv[]) {
             printf(" | 평균 하트 %.2f, 2하트 미만 %d마리, 데코 %d마리\n", sum / sel.count, low, decor);
         }
 
+        // Who the expedition pass may send (it keeps the training elite home, sends the rest strongest-first).
+        NSSet<NSString *> *elite = nil, *training = nil;
+        pkTroopStanding(all, &elite, &training);
+        int plainN = 0, spareN = 0, trainN = 0, trainBusy = 0;
+        for (PKPikmin *p in movable) { if ([training containsObject:p.pid]) trainN++; else if ([elite containsObject:p.pid]) spareN++; else plainN++; }
+        for (PKPikmin *p in all) if (p.status == 2 && [training containsObject:p.pid]) trainBusy++;
+        printf("\n[탐험 후보] 이동 가능 %lu마리 중 일반 %d · 정예(목표 달성) %d · 육성 대상 %d(제외) — 육성 대상 중 이미 작업중 %d\n",
+               (unsigned long)movable.count, plainN, spareN, trainN, trainBusy);
+
         // Replay: every troop member gains the same hearts each round (assumption).
         const float gain = 0.02f;
         printf("\n[재생] 라운드마다 부대원 +%.2f 하트(가정). 각 칸은 '4하트 이상 / 8하트' 마릿수\n", gain);
