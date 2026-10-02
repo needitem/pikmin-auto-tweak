@@ -80,6 +80,11 @@
     X(Seed_cur,       "currentSteps_",                   NULL,      0x54) \
     X(Seed_bonus,     "currentBonusSteps_",              NULL,      0x58) \
     X(Seed_planted,   "plantedTimeMs_",                  NULL,      0x60) \
+    X(Seed_type,      "seedType_",                       NULL,      0x18) \
+    X(Seed_pikmin,    "pikmin_",                         NULL,      0x68) \
+    X(Seed_weight,    "weightGrams_",                    NULL,      0x80) \
+    X(Seed_event,     "eventId_",                        NULL,      0x88) \
+    X(Seed_treasure,  "treasureType_",                   NULL,      0x90) \
     X(Planter_slots,  "slot_",                           NULL,      0x20) \
     X(Slot_seed,      "pikminSeedId_",                   NULL,      0x18) \
     X(Slot_remain,    "remainingUse_",                   NULL,      0x20) \

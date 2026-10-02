@@ -67,6 +67,12 @@ void *pkFindClassByName(const char *name, NSString **ns);
 // method signatures. For logs that explain a layout or an API we cannot read yet.
 NSString *pkDescribeClass(void *cls);
 
+// An enum's named constants as value -> name (empty when it cannot be read).
+NSDictionary<NSNumber *, NSString *> *pkEnumMap(void *enumClass);
+// First live instance of a UnityEngine.Object subclass (ScriptableObject
+// catalogs and the like), via Resources.FindObjectsOfTypeAll. NULL if none.
+void *pkFindObjectOfClass(void *cls);
+
 // Reflection over overloads (used to tell apart same-arity overloads).
 void pkEachMethod(void *cls, void (^fn)(void *method, const char *name, int argc));
 NSString *pkParamTypeName(void *method, int index);

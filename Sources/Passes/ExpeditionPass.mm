@@ -119,6 +119,7 @@ NSString *pkExpeditionPass(void) {
     NSArray<NSValue *> *exps = pkExpeditionItems();
     if (!exps.count) return @"탐험 없음";
     pkProbeExpedition(exps.firstObject.pointerValue);
+    pkProbeExpeditionTable(exps);
 
     // Census, so "nothing sent" can be told from "nothing startable is in the store".
     int nExp = 0, nIdle = 0;

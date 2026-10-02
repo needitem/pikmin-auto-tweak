@@ -44,6 +44,9 @@ typedef size_t       (*t_image_get_class_count)(const void*);
 typedef const void*  (*t_image_get_class)(const void*, size_t);
 typedef const char*  (*t_class_get_namespace)(void*);
 typedef const void*  (*t_method_get_return_type)(const void*);
+typedef void         (*t_field_static_get_value)(void*, void*);
+typedef const void*  (*t_class_get_type)(void*);
+typedef void*        (*t_type_get_object)(const void*);
 
 static t_domain_get f_domain_get;
 static t_thread_attach f_thread_attach;
@@ -82,6 +85,9 @@ static t_image_get_class_count f_image_get_class_count;
 static t_image_get_class f_image_get_class;
 static t_class_get_namespace f_class_get_namespace;
 static t_method_get_return_type f_method_get_return_type;
+static t_field_static_get_value f_field_static_get_value;
+static t_class_get_type f_class_get_type;
+static t_type_get_object f_type_get_object;
 
 static void *gUnity = NULL;
 #define SYM(v, name) v = (decltype(v))dlsym(gUnity ? gUnity : RTLD_DEFAULT, name)
@@ -159,6 +165,9 @@ BOOL pkRuntimeReady(void) {
     SYM(f_image_get_class, "il2cpp_image_get_class");
     SYM(f_class_get_namespace, "il2cpp_class_get_namespace");
     SYM(f_method_get_return_type, "il2cpp_method_get_return_type");
+    SYM(f_field_static_get_value, "il2cpp_field_static_get_value");
+    SYM(f_class_get_type, "il2cpp_class_get_type");
+    SYM(f_type_get_object, "il2cpp_type_get_object");
     done = f_domain_get && f_domain_get_assemblies && f_assembly_get_image &&
            f_class_from_name && f_class_get_method_from_name &&
            f_class_get_field_from_name && f_field_get_offset && f_object_new &&
@@ -419,6 +428,36 @@ void *pkFindClassByName(const char *name, NSString **ns) {
             }
         }
     }
+    return NULL;
+}
+
+NSDictionary<NSNumber *, NSString *> *pkEnumMap(void *cls) {
+    NSMutableDictionary *out = [NSMutableDictionary dictionary];
+    if (!cls || !f_class_get_fields || !f_field_get_flags || !f_field_get_name || !f_field_static_get_value) return out;
+    void *it = NULL, *fld;
+    while ((fld = f_class_get_fields(cls, &it))) {
+        int flags = f_field_get_flags(fld);
+        if (!(flags & 0x10) || !(flags & 0x40)) continue;            // static literal = an enum constant
+        int64_t v = 0;
+        f_field_static_get_value(fld, &v);
+        out[@((int)v)] = @(f_field_get_name(fld) ?: "?");
+    }
+    return out;
+}
+
+void *pkFindObjectOfClass(void *cls) {
+    if (!cls || !f_class_get_type || !f_type_get_object) return NULL;
+    void *res = pkClass("UnityEngine", "Resources");
+    void *m = res ? pkMethod(res, "FindObjectsOfTypeAll", 1) : NULL;
+    const void *t = f_class_get_type(cls);
+    void *tobj = t ? f_type_get_object(t) : NULL;
+    if (!m || !tobj) return NULL;
+    void *args[1] = { tobj };
+    void *arr = pkInvoke(m, NULL, args);                              // Object[]: length @0x18, items @0x20
+    if (!arr) return NULL;
+    size_t n = *(size_t *)((char *)arr + 0x18);
+    void **items = (void **)((char *)arr + 0x20);
+    for (size_t i = 0; i < n && i < 64; i++) if (items[i]) return items[i];
     return NULL;
 }
 

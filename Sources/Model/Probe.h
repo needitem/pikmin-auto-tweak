@@ -9,5 +9,15 @@
 #pragma once
 #import <Foundation/Foundation.h>
 
+// Stage 2: what the seedlings actually look like. `seedProtos` are PikminSeedProto
+// pointers (NSValue) from this pass. Logs the enum name tables, the distribution
+// of the player's seedlings (type, treasure, colour, category, steps), which
+// seed types the catalog calls large, and where the picture book (decor
+// collection) lives. Once per install.
+void pkProbeSeedTable(NSArray<NSValue *> *seedProtos);
+// The same view of the expeditions: what each one targets and, for those that
+// pay a seedling, the seedling. `items` are ExpeditionItemData pointers.
+void pkProbeExpeditionTable(NSArray<NSValue *> *items);
+
 void pkProbeSeedItem(void *seedInventoryItem);   // first seedling the seed pass sees
 void pkProbeExpedition(void *expeditionItemData); // first expedition the expedition pass sees
