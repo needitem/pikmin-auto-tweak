@@ -9,3 +9,4 @@ Model/SeedValue.mm
 Model/NectarKind.mm
 Model/ExpeditionPool.mm
 Support/Bisect.mm
+Model/FeedPlan.mm

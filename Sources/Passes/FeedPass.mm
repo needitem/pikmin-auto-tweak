@@ -1,5 +1,6 @@
 #import "Passes.h"
 #import "Backoff.h"
+#import "FeedPlan.h"
 #import "GameConstants.h"
 #import "GameContext.h"
 #import "Log.h"
@@ -34,73 +35,59 @@ static NSString *signatureOf(PKPikmin *p) {
     return [NSString stringWithFormat:@"%d/%d/%d", p.flowerState, p.flowerCount, p.wilted];
 }
 
-// Sort by held count (most first), id as the tie-break so the order is stable.
-static void sortByBalls(NSMutableArray<PKNectar *> *a) {
-    [a sortUsingComparator:^NSComparisonResult(PKNectar *x, PKNectar *y) {
-        if (x.balls != y.balls) return x.balls > y.balls ? NSOrderedAscending : NSOrderedDescending;
-        return [x.itemId compare:y.itemId];
-    }];
-}
+// ---------- the pass, one step at a time ----------
 
-// Which special nectar to spend. The game keeps the reel choice in the UI only
-// (not in the server prefs or a stored key), so the pinned stack — else the
-// pinned flower name — goes first; otherwise the kind we hold most of.
-static void promotePinned(NSMutableArray<PKNectar *> *special) {
-    NSString *wantId = [PKSettings stringForKey:kSettingSpecialId];
-    NSString *want = [PKSettings stringForKey:kSettingSpecial];
-    for (PKNectar *h in [special copy]) {
-        BOOL hit = wantId.length && [h.itemId isEqualToString:wantId];
-        if (!hit && want.length && !wantId.length)
-            hit = [h.kindName caseInsensitiveCompare:want] == NSOrderedSame || [@(h.hkind).stringValue isEqualToString:want];
-        if (hit) { [special removeObject:h]; [special insertObject:h atIndex:0]; break; }
-    }
-    if (special.count) {
-        NSMutableArray *bits = [NSMutableArray array];
-        for (PKNectar *h in special)
-            [bits addObject:[NSString stringWithFormat:@"%@ %d", h.kindName.length ? h.kindName : [NSString stringWithFormat:@"kind%d", h.hkind], h.balls]];
-        PKLOGC(@"feed.special", ([NSString stringWithFormat:@"[feed] 특수정수 보유: %@%@", [bits componentsJoinedByString:@", "],
-                                 want.length ? [NSString stringWithFormat:@" (지정: %@)", want] : @" (지정 없음 — 많은 것부터)"]));
-    }
-}
-
-NSString *pkFeedPass(void) {
-    if (!pkMgr() || !pkRpc()) return @"게임/서버 준비 대기";
-    pkNectarSyncSelection();                          // whatever is picked right now
-
-    NSMutableArray<PKNectar *> *plain = [NSMutableArray array], *special = [NSMutableArray array];
-    long long totPlain = 0, totSpecial = 0;
+// Split the nectar we may spend into plain and special stacks, with totals.
+typedef struct { long long plain, special; } PKStockTotals;
+static PKStockTotals splitStock(NSMutableArray<PKNectar *> *plain, NSMutableArray<PKNectar *> *special) {
+    PKStockTotals t = {0, 0};
     for (PKNectar *h in pkNectarList()) {
-        if (h.special) { [special addObject:h]; totSpecial += h.balls; }
-        else           { [plain addObject:h];   totPlain += h.balls; }
+        if (h.special) { [special addObject:h]; t.special += h.balls; }
+        else           { [plain addObject:h];   t.plain += h.balls; }
     }
-    if (!totPlain && !totSpecial) return @"🍯 정수 없음";
-    sortByBalls(plain); sortByBalls(special);
-    promotePinned(special);
+    return t;
+}
 
-    NSArray<PKPikmin *> *squad = pkSquad();
-    if (!squad.count) return @"🍯 대열에 피크민 없음 (배치/출격 필요)";
+static void logSpecialStock(NSArray<PKNectar *> *special, NSString *pinnedKind) {
+    if (!special.count) return;
+    NSMutableArray *bits = [NSMutableArray array];
+    for (PKNectar *h in special)
+        [bits addObject:[NSString stringWithFormat:@"%@ %d", h.kindName.length ? h.kindName : [NSString stringWithFormat:@"kind%d", h.hkind], h.balls]];
+    PKLOGC(@"feed.special", ([NSString stringWithFormat:@"[feed] 특수정수 보유: %@%@", [bits componentsJoinedByString:@", "],
+                             pinnedKind.length ? [NSString stringWithFormat:@" (지정: %@)", pinnedKind] : @" (지정 없음 — 많은 것부터)"]));
+}
+
+// What the squad looks like, for the log, and the ids that still exist (the
+// backoff forgets the others).
+static NSSet<NSString *> *censusOfSquad(NSArray<PKPikmin *> *squad) {
     NSMutableSet<NSString *> *alive = [NSMutableSet set];
-    {
-        int byState[8] = {0}; long long petals = 0;
-        for (PKPikmin *p in squad) {
-            [alive addObject:p.pid];
-            if (p.flowerState >= 0 && p.flowerState < 8) byState[p.flowerState]++;
-            petals += p.flowerCount + p.wilted;
-        }
-        PKLOGC(@"feed.census", ([NSString stringWithFormat:@"[feed] 대열 %lu: 잎%d 봉오리%d 꽃%d 수확가능%d 시듦%d 기타%d / 지금 딸 수 있는 꽃잎 %lld",
-                                 (unsigned long)squad.count, byState[PK_PF_LEAF], byState[PK_PF_BUD], byState[PK_PF_FLOWER],
-                                 byState[PK_PF_PICK], byState[PK_PF_WILTED], byState[0] + byState[2] + byState[7], petals]));
+    int byState[8] = {0}; long long petals = 0;
+    for (PKPikmin *p in squad) {
+        [alive addObject:p.pid];
+        if (p.flowerState >= 0 && p.flowerState < 8) byState[p.flowerState]++;
+        petals += p.flowerCount + p.wilted;
     }
-    [backoff() pruneKeeping:alive];
+    PKLOGC(@"feed.census", ([NSString stringWithFormat:@"[feed] 대열 %lu: 잎%d 봉오리%d 꽃%d 수확가능%d 시듦%d 기타%d / 지금 딸 수 있는 꽃잎 %lld",
+                             (unsigned long)squad.count, byState[PK_PF_LEAF], byState[PK_PF_BUD], byState[PK_PF_FLOWER],
+                             byState[PK_PF_PICK], byState[PK_PF_WILTED], byState[0] + byState[2] + byState[7], petals]));
+    return alive;
+}
 
-    // A bucket whose petal stock is at the cap wastes the nectar (the harvest overflows).
-    int petalCap = pkPetalCapacity();
+// A bucket whose petal stock is at the cap wastes the nectar (the harvest overflows).
+static NSSet<NSString *> *cappedBuckets(int *petalCap) {
+    *petalCap = pkPetalCapacity();
     NSMutableSet<NSString *> *capped = [NSMutableSet set];
-    if (petalCap > 0)
+    if (*petalCap > 0)
         for (PKPetal *p in pkPetalList())
-            if (p.num >= petalCap) { NSString *k = pkBucketOfPetal(p); if (k) [capped addObject:k]; }
+            if (p.num >= *petalCap) { NSString *k = pkBucketOfPetal(p); if (k) [capped addObject:k]; }
+    return capped;
+}
 
-    NSMutableArray<PKPikmin *> *buds = [NSMutableArray array], *flowers = [NSMutableArray array];
+// Who gets fed now: buds/leaves in one group, open flowers in the other.
+// Skipped: heads the harvest pass handles, unknown heads, flowers whose petal
+// bucket is at the cap, and anyone still waiting out a backoff.
+static void classifySquad(NSArray<PKPikmin *> *squad, NSSet<NSString *> *capped, int petalCap,
+                          NSMutableArray<PKPikmin *> *buds, NSMutableArray<PKPikmin *> *flowers) {
     int nCapped = 0, nWaiting = 0;
     for (PKPikmin *p in squad) {
         if (p.flowerState == PK_PF_PICK || p.flowerState == PK_PF_WILTED) continue;   // the harvest pass's business
@@ -114,58 +101,64 @@ NSString *pkFeedPass(void) {
     }
     PKLOGC(@"feed.petalcap", ([NSString stringWithFormat:@"[feed] 꽃잎상한 %d · 꽉찬 버킷 %lu개 · 상한제외 %d마리 · 결과대기 %d (먹일 봉오리 %lu · 꽃 %lu)",
                                petalCap, (unsigned long)capped.count, nCapped, nWaiting, (unsigned long)buds.count, (unsigned long)flowers.count]));
+}
+
+// Queue the feeds for `targets` from `stacks` in order (the plan is FeedPlan's;
+// the pacer sends) and note each fed Pikmin so it backs off if its head does not
+// change. `remaining` is shared by every group fed in the pass.
+static int feedGroup(NSArray<PKPikmin *> *targets, NSArray<PKNectar *> *stacks, NSMutableDictionary<NSString *, NSNumber *> *remaining) {
+    NSMutableDictionary<NSString *, PKPikmin *> *byPid = [NSMutableDictionary dictionary];
+    for (PKPikmin *p in targets) byPid[p.pid] = p;
+    int done = 0;
+    for (PKFeedBatch *batch in pkFeedAllocate([targets valueForKey:@"pid"], stacks, remaining)) {
+        NSString *itemId = batch.itemId; NSArray<NSString *> *pids = batch.pids;
+        pkRpcDefer(^{ pkRpcFeed(pids, itemId, 1); });              // queued and paced, see RpcPacer
+        for (NSString *pid in pids) [backoff() recordSend:pid signature:signatureOf(byPid[pid])];
+        done += (int)pids.count;
+    }
+    return done;
+}
+
+NSString *pkFeedPass(void) {
+    if (!pkMgr() || !pkRpc()) return @"게임/서버 준비 대기";
+    pkNectarSyncSelection();                          // whatever is picked right now
+
+    NSMutableArray<PKNectar *> *plain = [NSMutableArray array], *special = [NSMutableArray array];
+    PKStockTotals tot = splitStock(plain, special);
+    if (!tot.plain && !tot.special) return @"🍯 정수 없음";
+    pkSortByBalls(plain); pkSortByBalls(special);
+    NSString *pinnedId = [PKSettings stringForKey:kSettingSpecialId], *pinnedKind = [PKSettings stringForKey:kSettingSpecial];
+    pkPromotePinned(special, pinnedId, pinnedKind);
+    logSpecialStock(special, pinnedKind);
+
+    NSArray<PKPikmin *> *squad = pkSquad();
+    if (!squad.count) return @"🍯 대열에 피크민 없음 (배치/출격 필요)";
+    [backoff() pruneKeeping:censusOfSquad(squad)];
+
+    int petalCap = 0;
+    NSSet<NSString *> *capped = cappedBuckets(&petalCap);
+    NSMutableArray<PKPikmin *> *buds = [NSMutableArray array], *flowers = [NSMutableArray array];
+    classifySquad(squad, capped, petalCap, buds, flowers);
 
     // One budget per stack, shared by both groups, so a stack is never spent twice.
     NSMutableDictionary<NSString *, NSNumber *> *remaining = [NSMutableDictionary dictionary];
     for (PKNectar *h in [plain arrayByAddingObjectsFromArray:special]) remaining[h.itemId] = @(h.balls);
 
-    // Feed `targets` from `stacks` in order, five ids per request, one item each.
-    int (^feed)(NSArray<PKPikmin *> *, NSArray<PKNectar *> *) = ^int(NSArray<PKPikmin *> *targets, NSArray<PKNectar *> *stacks) {
-        int done = 0;
-        NSUInteger next = 0;
-        for (PKNectar *stack in stacks) {
-            while (next < targets.count && remaining[stack.itemId].intValue > 0) {
-                NSUInteger n = MIN((NSUInteger)5, MIN(targets.count - next, (NSUInteger)remaining[stack.itemId].intValue));
-                NSArray<PKPikmin *> *chunk = [targets subarrayWithRange:NSMakeRange(next, n)];
-                NSMutableArray<NSString *> *pids = [NSMutableArray array];
-                for (PKPikmin *p in chunk) [pids addObject:p.pid];
-                NSString *itemId = stack.itemId;
-                pkRpcDefer(^{ pkRpcFeed(pids, itemId, 1); });          // queued and paced, see RpcClient
-                for (PKPikmin *p in chunk) [backoff() recordSend:p.pid signature:signatureOf(p)];
-                remaining[stack.itemId] = @(remaining[stack.itemId].intValue - (int)n);
-                done += (int)n; next += n;
-            }
-        }
-        return done;
-    };
-
     // Buds/leaves take special nectar; plain when we hold none — or when every
     // special stack is held back because its flower's petals are at the cap
     // (that nectar would only overflow the harvest). Without that fallback a
     // squad of buds sat unfed beside hundreds of plain nectar.
-    NSMutableArray<PKNectar *> *budStacks = [NSMutableArray array];
-    NSMutableArray<NSString *> *held = [NSMutableArray array];
-    void (^addUsable)(NSArray<PKNectar *> *) = ^(NSArray<PKNectar *> *stacks) {
-        for (PKNectar *h in stacks) {
-            NSString *bk = pkBucketOfNectar(h);
-            if (bk && [capped containsObject:bk]) {
-                [held addObject:[NSString stringWithFormat:@"%@(색%d)", h.kindName.length ? h.kindName : @"일반", h.type]];
-                continue;
-            }
-            [budStacks addObject:h];
-        }
-    };
-    addUsable(special);
+    NSArray<NSString *> *held = nil;
     BOOL plainForBuds = NO;
-    if (!budStacks.count) { plainForBuds = special.count > 0; addUsable(plain); }
+    NSArray<PKNectar *> *budStacks = pkBudStacks(special, plain, capped, ^NSString *(PKNectar *h) { return pkBucketOfNectar(h); }, &held, &plainForBuds);
     if (held.count)
         PKLOGC(@"feed.budcap", ([NSString stringWithFormat:@"[feed] 버킷 상한이라 봉오리에 안 쓰는 정수 %lu종: %@%@", (unsigned long)held.count,
                                  [held componentsJoinedByString:@", "], plainForBuds ? @" → 일반 정수로 대체" : @""]));
-    int fedBud = feed(buds, budStacks);
-    int fedFlower = feed(flowers, plain);
+    int fedBud = feedGroup(buds, budStacks, remaining);
+    int fedFlower = feedGroup(flowers, plain, remaining);
     PKNectar *sp = special.firstObject;
     return [NSString stringWithFormat:@"🍯 봉오리/잎 %d마리%@ · 꽃 %d마리(일반) / 일반 %lld 특수 %lld",
             fedBud,
             sp && !plainForBuds ? [NSString stringWithFormat:@"(특수 %@)", sp.kindName.length ? sp.kindName : [NSString stringWithFormat:@"kind%d", sp.hkind]] : @"(일반)",
-            fedFlower, totPlain, totSpecial];
+            fedFlower, tot.plain, tot.special];
 }
