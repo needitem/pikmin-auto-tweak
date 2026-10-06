@@ -8,6 +8,7 @@
 #import "Layout.h"
 #import "Log.h"
 #import "RpcClient.h"
+#import "RpcPacer.h"
 
 // Pikmin come home holding things: fruit and seedlings they carried, gifts.
 // Each is a PikminTask in the inventory, claimed with CompletePikminTask —

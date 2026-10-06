@@ -15,6 +15,14 @@ static PKFeature *make(NSString *tag, NSTimeInterval pace, BOOL camera, NSString
     return f;
 }
 
+static void stagger(NSArray<PKFeature *> *features, NSTimeInterval now) {
+    [features enumerateObjectsUsingBlock:^(PKFeature *f, NSUInteger i, BOOL *stop) {
+        f.lastRun = now - f.pace + fmod(1.0 + 2.0 * (double)i, f.pace);
+    }];
+}
+
+void pkFeaturesRestagger(NSTimeInterval now) { stagger(pkFeatures(), now); }
+
 NSArray<PKFeature *> *pkFeatures(void) {
     static NSArray<PKFeature *> *all;
     static dispatch_once_t once;
@@ -31,14 +39,7 @@ NSArray<PKFeature *> *pkFeatures(void) {
             make(@"부대",     30, NO, pkTroopPass),    // an arrange RPC never moves the camera
             make(@"번호",     15, NO, pkNumberingPass), // rename every Pikmin to its pluck-order number
         ];
-        // Stagger the first runs. Every feature used to start at lastRun = 0, so
-        // equal paces (harvest/탐험 at 8 s, 모종/수집 at 10 s, 심기/부대 at 30 s)
-        // stayed on the same tick forever and their scans stacked into one long
-        // main-thread stall. A distinct phase per feature keeps them apart.
-        NSTimeInterval now = pkMono();
-        [all enumerateObjectsUsingBlock:^(PKFeature *f, NSUInteger i, BOOL *stop) {
-            f.lastRun = now - f.pace + fmod(1.0 + 2.0 * (double)i, f.pace);
-        }];
+        stagger(all, pkMono());
     });
     return all;
 }

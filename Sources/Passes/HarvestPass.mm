@@ -5,6 +5,7 @@
 #import "Runtime.h"
 #import "Roster.h"
 #import "RpcClient.h"
+#import "RpcPacer.h"
 
 // Only Pikmin whose petals have actually fallen — wiltedCount_ above zero, or
 // the explicit FLOWER_READY_TO_PICK state. Sending the whole squad, most of it

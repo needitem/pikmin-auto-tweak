@@ -1,7 +1,6 @@
 #import "RpcClient.h"
 #import "GameContext.h"
 #import "Layout.h"
-#import "Clock.h"
 #import "Log.h"
 
 // RpcManager.Send<Name>Rpc[ForResult]Async(request, CancellationToken.None, RpcRetryPolicy).
@@ -14,45 +13,6 @@ NSString *pkRpcStats(void) {
         [bits addObject:[NSString stringWithFormat:@"%@ %@", k, gSent[k]]];
     [gSent removeAllObjects];
     return [bits componentsJoinedByString:@", "];
-}
-
-// ---------- paced sending ----------
-static const NSTimeInterval kPaceGap = 0.25;       // between two deferred requests
-static const NSTimeInterval kMaxWait = 20.0;       // a request never waits longer than this for a calm moment
-
-static NSMutableArray<void (^)(void)> *gQueue;
-static NSMutableArray<NSNumber *> *gQueuedAt;
-static NSTimer *gPacer;
-static BOOL (^gGate)(void);
-static unsigned long gDeferred, gForced;
-static NSUInteger gQueuePeak;
-
-static void pump(void) {
-    if (!gQueue.count) { [gPacer invalidate]; gPacer = nil; return; }
-    BOOL calm = !gGate || gGate();
-    BOOL stale = pkMono() - gQueuedAt.firstObject.doubleValue > kMaxWait;
-    if (!calm && !stale) return;
-    if (!calm) gForced++;
-    void (^send)(void) = gQueue.firstObject;
-    [gQueue removeObjectAtIndex:0]; [gQueuedAt removeObjectAtIndex:0];
-    send();
-}
-
-void pkRpcSetGate(BOOL (^calm)(void)) { gGate = [calm copy]; }
-
-void pkRpcDefer(void (^send)(void)) {
-    if (!gQueue) { gQueue = [NSMutableArray array]; gQueuedAt = [NSMutableArray array]; }
-    [gQueue addObject:[send copy]]; [gQueuedAt addObject:@(pkMono())];
-    gDeferred++;
-    gQueuePeak = MAX(gQueuePeak, gQueue.count);
-    if (!gPacer) gPacer = [NSTimer scheduledTimerWithTimeInterval:kPaceGap repeats:YES block:^(NSTimer *t) { pump(); }];
-}
-
-NSString *pkRpcQueueStats(void) {
-    NSString *s = [NSString stringWithFormat:@"예약 %lu · 강제 %lu · 대기 %lu (최대 %lu)", gDeferred, gForced,
-                   (unsigned long)gQueue.count, (unsigned long)gQueuePeak];
-    gDeferred = gForced = 0; gQueuePeak = gQueue.count;
-    return s;
 }
 
 static BOOL sendRpc(const char *rpcMethod, void *req) {

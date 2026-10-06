@@ -13,3 +13,8 @@
 @end
 
 NSArray<PKFeature *> *pkFeatures(void);
+
+// Give every feature its own phase so their next runs do not coincide (equal
+// paces would otherwise stay on the same tick forever). Used at first start and
+// whenever every pass has become overdue at once.
+void pkFeaturesRestagger(NSTimeInterval now);

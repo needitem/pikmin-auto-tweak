@@ -7,6 +7,7 @@
 #import "Petals.h"
 #import "Roster.h"
 #import "RpcClient.h"
+#import "RpcPacer.h"
 #import "Settings.h"
 
 // Feed the squad, matching the nectar to what each Pikmin's head is doing.
