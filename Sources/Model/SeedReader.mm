@@ -2,6 +2,7 @@
 #import "Layout.h"
 #import "Log.h"
 #import "Runtime.h"
+#import "Reflection.h"
 #import <unordered_map>
 
 // Large seedling types as the catalog reported them on this build, used only

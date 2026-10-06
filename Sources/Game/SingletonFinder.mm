@@ -2,6 +2,7 @@
 #import "GameContext.h"
 #import "Log.h"
 #import "Runtime.h"
+#import "Reflection.h"
 #import <QuartzCore/QuartzCore.h>
 #import <unordered_set>
 #import <vector>

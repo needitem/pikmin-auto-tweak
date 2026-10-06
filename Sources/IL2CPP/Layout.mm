@@ -1,9 +1,9 @@
 #import "Layout.h"
 #import "Log.h"
+#import "Reflection.h"
 #import "Settings.h"
 #import <os/lock.h>
 
-void *pkRawFieldOffsetByName(void *cls, const char *name, ptrdiff_t *off);   // Runtime.mm
 
 #define PK_DEFINE_FIELD(id, n, a, fb) PKField F_##id = PKF(n, a, fb);
 PK_LAYOUT(PK_DEFINE_FIELD)

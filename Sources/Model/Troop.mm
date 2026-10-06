@@ -1,4 +1,5 @@
 #import "Troop.h"
+#import "Reflection.h"
 #import "Clock.h"
 #import "GameConstants.h"
 #import "GameContext.h"

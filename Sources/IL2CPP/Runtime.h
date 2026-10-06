@@ -33,7 +33,6 @@ void *pkClassOf(void *obj);
 NSString *pkClassName(void *obj);                                // "Boolean", "ReactiveProperty`1", …
 void *pkMethod(void *cls, const char *name, int argc);           // cached
 void *pkMethodOf(void *obj, const char *name, int argc);
-void *pkNestedClass(void *outer, const char *name);              // Outer.Types.Inner
 
 // Invocation. Exceptions are logged (throttled) and reported as NULL/NO.
 void *pkInvoke(void *method, void *obj, void **args);
@@ -52,29 +51,6 @@ void *pkNewString(NSString *s);
 void *pkNewObj(void *cls);                                       // new + .ctor()
 void *pkNewProto(const char *name, void **outCls);               // Ichigo.Proto.<name>
 void  pkWriteRef(void *obj, void **slot, void *value);           // GC write barrier when available
-
-// Offset of a named instance field of `cls` (own class or a parent), or NULL when
-// it has none.
-void *pkRawFieldOffsetByName(void *cls, const char *name, ptrdiff_t *off);
-
-// A class by its simple name alone (any namespace, any assembly); the namespace
-// comes back in `ns`. Walks every class once per distinct name, so it is for
-// diagnostics, not for passes.
-void *pkFindClassByName(const char *name, NSString **ns);
-
-// An enum's named constants as value -> name (empty when it cannot be read).
-NSDictionary<NSNumber *, NSString *> *pkEnumMap(void *enumClass);
-// First live instance of a UnityEngine.Object subclass (ScriptableObject
-// catalogs and the like), via Resources.FindObjectsOfTypeAll. NULL if none.
-void *pkFindObjectOfClass(void *cls);
-
-// Reflection over overloads (used to tell apart same-arity overloads).
-void pkEachMethod(void *cls, void (^fn)(void *method, const char *name, int argc));
-NSString *pkParamTypeName(void *method, int index);
-
-// Every non-null reference-typed instance field of `obj` (own class and parents),
-// as the referenced objects. Value-type fields are never read as pointers.
-void pkEachRefField(void *obj, void (^fn)(void *child));
 
 // Hooks.
 BOOL pkHookMethod(void *cls, const char *method, int argc, void *hook, void **orig);
