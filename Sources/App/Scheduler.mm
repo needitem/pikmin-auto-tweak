@@ -1,5 +1,6 @@
 #import "Scheduler.h"
 #import "Clock.h"
+#import "CpuStats.h"
 #import "Frame.h"
 #import "SingletonFinder.h"
 #import "FrameRate.h"
@@ -9,10 +10,9 @@
 #import "Location.h"
 #import "Log.h"
 #import "Passes.h"
+#import "RpcClient.h"
 #import "Settings.h"
 #import <UIKit/UIKit.h>
-
-NSString * const PKFeaturesChangedNotification = @"PKFeaturesChanged";
 
 static const NSTimeInterval kTickGap = 0.7;        // the 1 s timer and 1 Hz location fixes must not double-fire
 static const NSTimeInterval kMapPace = 30.0;       // mapobjects.json refresh
@@ -54,43 +54,14 @@ static void runFeature(PKFeature *f) {
 
 // ---------- shared switches ----------
 static void syncSideEffects(void) {
-    BOOL camera = NO, automating = NO;
-    for (PKFeature *f in pkFeatures()) {
-        if (!f.enabled) continue;
-        camera |= f.suppressCamera;
-        automating |= f.inAuto;
-    }
+    BOOL camera = NO;
+    for (PKFeature *f in pkFeatures()) camera |= f.suppressCamera;
     // Rendering the map is the heat source: cap the frame rate while any part of
     // the pipeline is running. The cap is constant on purpose — the phone is in
     // the player's hand most of the time, so a cap that lifts on touch would
     // never be on.
     pkSetCameraSuppress(camera);
-    pkApplyFrameRate(automating);
-}
-
-static void changed(void) {
-    syncSideEffects();
-    [[NSNotificationCenter defaultCenter] postNotificationName:PKFeaturesChangedNotification object:nil];
-}
-
-void pkFeatureSetEnabled(PKFeature *f, BOOL on) {
-    [PKSettings setBool:on forKey:f.key];
-    changed();
-    PALOG(@"[%@] %@", f.tag, on ? @"ON" : @"OFF");
-    // Run once right away — and stamp lastRun, so the next tick does not run it again.
-    if (on) runFeature(f);
-}
-
-BOOL pkAutoEnabled(void) {
-    for (PKFeature *f in pkFeatures()) if (f.inAuto && !f.enabled) return NO;
-    return YES;
-}
-
-void pkAutoSetEnabled(BOOL on) {
-    for (PKFeature *f in pkFeatures()) if (f.inAuto) [PKSettings setBool:on forKey:f.key];
-    changed();
-    PALOG(@"[자동성장] %@", on ? @"ON — 정수/수확/수집/탐험/심기/큰꽃/모종/부대 전부" : @"OFF");
-    if (on) { pkSchedulerTick(); }
+    pkApplyFrameRate(YES);
 }
 
 // ---------- the tick ----------
@@ -126,7 +97,6 @@ void pkSchedulerTick(void) {
     // / squad / nectar / petal scan (runFeature nests inside it).
     pkFrameBegin();
     for (PKFeature *f in pkFeatures()) {
-        if (!f.enabled) continue;
         if (now - f.lastRun >= f.pace) runFeature(f);
     }
     if (pkMapObj() && now - lastMap >= kMapPace) { lastMap = now; timed(@"map", ^{ pkMapDumpPass(); return @""; }); }
@@ -135,8 +105,24 @@ void pkSchedulerTick(void) {
 }
 
 // ---------- maintenance ----------
+// How late the 1 s timer fires: whatever kept the main thread busy (a heavy
+// frame, our own passes, a game stall) shows up here. Reset by each heartbeat.
+static double gLateMax = 0;
+static int gLate100 = 0, gLate500 = 0;
+
 static void maintenance(void) {
-    if (!appActive()) return;
+    static NSTimeInterval lastFire = 0;
+    NSTimeInterval fired = pkMono();
+    if (!appActive()) { lastFire = 0; return; }
+    if (lastFire > 0) {
+        double late = fired - lastFire - 1.0;
+        if (late < 30) {                                   // a resume from the background is not a stall
+            gLateMax = MAX(gLateMax, late);
+            if (late > 0.1) gLate100++;
+            if (late > 0.5) gLate500++;
+        }
+    }
+    lastFire = fired;
     static int beat = 0;
     // Only runs that did real work are recorded, so the [hb] ms/calls reads as
     // the cost of one run.
@@ -152,6 +138,9 @@ static void maintenance(void) {
     PALOG(@"[hb] rpc=%d mgr=%d inv=%d 위치 %lu회, 마지막 %.0f초 전 | 발열 %@, 배터리 %.0f%% | 패스 %@",
           pkRpc() != NULL, pkMgr() != NULL, pkInv() != NULL, pkLocationCount(), MIN(pkLocationAge(), 9999.0),
           therm[MIN((int)ts, 3)], UIDevice.currentDevice.batteryLevel * 100.0, takeTimings());
+    PALOG(@"[hb2] %@ | 후킹 호출/분 %@ | RPC/분 %@ | 메인 지연 최대 %.0fms (>100ms %d회, >500ms %d회)",
+          pkCpuSummary(), pkHookStats(), pkRpcStats(), MAX(gLateMax, 0) * 1000.0, gLate100, gLate500);
+    gLateMax = 0; gLate100 = gLate500 = 0;
 }
 
 void pkSchedulerStart(void) {
@@ -164,5 +153,4 @@ void pkSchedulerStart(void) {
     [NSTimer scheduledTimerWithTimeInterval:1.0 repeats:YES block:^(NSTimer *t) { pkSchedulerTick(); }];
     [NSTimer scheduledTimerWithTimeInterval:1.0 repeats:YES block:^(NSTimer *t) { maintenance(); }];
     syncSideEffects();
-    if (!pkAutoEnabled()) PALOG(@"[ui] 자동성장 OFF — 버튼으로 켜면 전 파이프라인 가동");
 }

@@ -9,7 +9,7 @@ Dependencies point downward only; each module has one reason to change.
 
 | Layer | Path | Responsibility |
 |---|---|---|
-| App | `Sources/App` | `Tweak.mm` entry point · `Features.mm` registry (the one place to add a feature) · `Scheduler` (when passes run) · `Overlay` (UI) · `FrameRate` |
+| App | `Sources/App` | `Tweak.mm` entry point · `Features.mm` registry (the one place to add a feature) · `Scheduler` (when passes run) · `FrameRate` |
 | Passes | `Sources/Passes` | One decision procedure per feature (`FeedPass`, `HarvestPass`, …) + the GPS Wander dumps |
 | Rpc | `Sources/Rpc` | `RpcClient`: builds and sends request protos; the only module that knows request shapes |
 | Model | `Sources/Model` | Read-only snapshots of game state: roster, troop, nectar, petals, map objects, expeditions, location |
@@ -24,6 +24,7 @@ Dependencies point downward only; each module has one reason to change.
 - **Fields are found by name** (`Layout.h`); the dump's offsets are a fallback only while the game build is unchanged. After a game update, unresolved fields fail closed and the scheduler pauses (`[layout]` lines in the log) instead of reading garbage.
 - **Hooks capture, passes act.** Production hooks never call back into il2cpp from a game callback. Request-logging hooks exist only with `pa_debug`.
 - **Every fire-and-forget request goes through `PKBackoff`** — no resend before the game can answer, longer waits when the target's state did not move.
+- **No UI, no switches.** Every feature in `Features.mm` always runs; there is no overlay and nothing to toggle.
 - **Foreground only.** Passes, the finder and the heartbeat run only while the app is active. Nothing in the tweak keeps the process alive in the background (no background location session); location updates stop when the app is backgrounded.
 - **One pass, one file, one status line.** Pacing lives only in `Features.mm` / `Scheduler.mm`.
 
@@ -31,8 +32,6 @@ Dependencies point downward only; each module has one reason to change.
 
 | Key | Meaning |
 |---|---|
-| `pa_feed` `pa_harvest` `pa_collect` `pa_expedition` `pa_plant` `pa_poi` `pa_seed` `pa_troop` | the eight 자동성장 features |
-| `pa_number` | Pikmin numbering (default on) |
 | `pa_camsuppress` | keep the camera still while automating (default on) |
 | `pa_fps` | frame-rate cap while automating (5–60; default 0 = no cap) |
 | `pa_debug` | install request-logging hooks (needs a relaunch) |

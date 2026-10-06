@@ -1,7 +1,7 @@
 // Entry point. Everything else is a module; see the layer map in README.md.
-#import "Overlay.h"
 #import "Runtime.h"
 #import "Scheduler.h"
+#import <UIKit/UIKit.h>
 #import <pthread.h>
 #import <unistd.h>
 
@@ -12,11 +12,18 @@
 // touching il2cpp earlier crashes inside UnityFramework at launch.
 static const useconds_t kArmGraceUs = 3 * 1000 * 1000;
 
+// Main thread. The game has a window scene once Unity has set its UI up.
+static BOOL sceneReady(void) {
+    for (UIScene *s in [UIApplication sharedApplication].connectedScenes)
+        if ([s isKindOfClass:UIWindowScene.class]) return YES;
+    return NO;
+}
+
 static void *waitForGame(void *unused) {
     dispatch_sync(dispatch_get_main_queue(), ^{ pkSchedulerStart(); });
     for (int i = 0; i < 14400; i++) {                 // an hour of quarter-seconds
         __block BOOL done = NO;
-        dispatch_sync(dispatch_get_main_queue(), ^{ done = pkOverlayEnsure(); });
+        dispatch_sync(dispatch_get_main_queue(), ^{ done = sceneReady(); });
         if (done) {
             usleep(kArmGraceUs);
             dispatch_sync(dispatch_get_main_queue(), ^{ pkRuntimeArm(); });

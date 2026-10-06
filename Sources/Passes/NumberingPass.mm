@@ -28,8 +28,6 @@ static NSTimer *gTimer = nil;
 static NSMutableArray<NSArray<NSString *> *> *gQueue = nil;   // @[ pikminId, wantedName, nameAtQueueTime ]
 
 static void drainOne(NSTimer *t) {
-    // Switched off mid-run: drop what is left.
-    if (![PKSettings boolForKey:kKeyNumber]) [gQueue removeAllObjects];
     if (!gQueue.count) { [t invalidate]; gTimer = nil; return; }
     NSArray<NSString *> *e = gQueue.firstObject;
     [gQueue removeObjectAtIndex:0];

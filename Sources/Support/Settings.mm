@@ -1,15 +1,6 @@
 #import "Settings.h"
 #import <os/lock.h>
 
-NSString * const kKeyFeed       = @"pa_feed";
-NSString * const kKeyHarvest    = @"pa_harvest";
-NSString * const kKeyCollect    = @"pa_collect";
-NSString * const kKeyExpedition = @"pa_expedition";
-NSString * const kKeyPlant      = @"pa_plant";
-NSString * const kKeyPoi        = @"pa_poi";
-NSString * const kKeySeed       = @"pa_seed";
-NSString * const kKeyTroop      = @"pa_troop";
-NSString * const kKeyNumber     = @"pa_number";
 
 NSString * const kSettingDebug       = @"pa_debug";
 NSString * const kSettingCamSuppress = @"pa_camsuppress";
@@ -28,7 +19,6 @@ static NSMutableDictionary<NSString *, NSNumber *> *gBools;
     os_unfair_lock_unlock(&gLock);
     [[NSUserDefaults standardUserDefaults] registerDefaults:@{
         kSettingCamSuppress: @YES,
-        kKeyNumber: @YES,            // auto-numbering was always on before it had a switch
     }];
 }
 
