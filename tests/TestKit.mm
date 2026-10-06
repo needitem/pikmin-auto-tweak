@@ -26,3 +26,14 @@ PKNectar *nectar(NSString *itemId, int balls, int type, NSString *kindName, int 
     n.special = kindName.length > 0;
     return n;
 }
+
+// Petals.mm owns the real implementation (it reads the game).
+#import "Petals.h"
+@implementation PKPetal
+@end
+
+PKPetal *petal(NSString *itemId, int num, BOOL special) {
+    PKPetal *p = [PKPetal new];
+    p.itemId = itemId; p.num = num; p.special = special; p.flowerName = special ? @"canna" : @"";
+    return p;
+}

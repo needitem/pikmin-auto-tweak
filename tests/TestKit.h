@@ -3,6 +3,7 @@
 #import <Foundation/Foundation.h>
 #import "Roster.h"
 #import "Nectar.h"
+#import "Petals.h"
 
 extern int gChecks, gFailures;
 #define CHECK(cond) do { gChecks++; if (!(cond)) { gFailures++; fprintf(stderr, "  FAIL %s:%d  %s\n", __FILE__, __LINE__, #cond); } } while (0)
@@ -14,3 +15,6 @@ PKPikmin *pikmin(NSString *pid, int color, float hearts, BOOL decor, int status)
 
 // One nectar stack: `kindName` empty for plain nectar.
 PKNectar *nectar(NSString *itemId, int balls, int type, NSString *kindName, int hkind);
+
+// One petal stack; `special` for a named flower (kept for decor).
+PKPetal *petal(NSString *itemId, int num, BOOL special);

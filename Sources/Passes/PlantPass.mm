@@ -5,25 +5,17 @@
 #import "Log.h"
 #import "Nectar.h"
 #import "Petals.h"
+#import "PlantPlan.h"
 
 // Keep a planting session running on the plain petal stack we hold the MOST of.
 // The game's own FlowerPlantingController starts it exactly as the 심기 button
 // does; from then on the game itself sends PlantFlower as the (spoofed) location
 // moves and stops when the petals run out.
 //
-// The choice is re-checked every pass, not only at start: while a session that
-// WE started is running, if another stack has become bigger than the one being
-// planted by at least kSwitchMargin petals, the session is stopped and restarted
-// on the bigger stack. The margin keeps near-equal stacks from making the
-// session flap on and off every petal. A session the player started by hand is
-// left alone (we do not know which petal it is spending).
-//
+// What to do each pass (start, keep, switch to a bigger stack, leave a hand-started
+// session alone) is decided in Model/PlantPlan; this pass reads the controller's
+// state, applies the decision, and remembers when it last asked to start or stop.
 // Only plain petals are used (special kinds are kept for decor).
-static const int kSwitchMargin = 10;
-static const NSTimeInterval kStartGap = 60;       // a start that did not go live is not retried every pass
-static const NSTimeInterval kStopGap = 20;        // stop is async; do not repeat it
-static const NSTimeInterval kAdoptGap = 90;       // a session may take a while to go live after the request
-
 static NSString *gPlantingId = nil;               // the stack our running session spends
 static NSTimeInterval gLastStart = -1e9, gLastStop = -1e9;
 
@@ -41,19 +33,15 @@ static BOOL sessionLive(void *plant, BOOL *known) {
     return planting || starting;
 }
 
-// Most petals first; the id breaks ties so the choice is stable.
-static PKPetal *biggestPlain(NSArray<PKPetal *> *petals) {
-    PKPetal *best = nil;
-    for (PKPetal *p in petals) {
-        if (p.special) continue;
-        if (!best || p.num > best.num || (p.num == best.num && [p.itemId compare:best.itemId] == NSOrderedAscending)) best = p;
-    }
-    return best;
-}
-
-static PKPetal *stackById(NSArray<PKPetal *> *petals, NSString *itemId) {
-    for (PKPetal *p in petals) if ([p.itemId isEqualToString:itemId]) return p;
-    return nil;
+// What we hold, every 5 minutes.
+static void logCensus(NSArray<PKPetal *> *petals) {
+    static NSTimeInterval lastCensus = -1e9;
+    if (pkMono() - lastCensus <= 300) return;
+    lastCensus = pkMono();
+    NSMutableArray *bits = [NSMutableArray array];
+    for (PKPetal *p in petals)
+        [bits addObject:[NSString stringWithFormat:@"c%dk%d[%@]x%d%@", p.color, p.kind, p.flowerName, p.num, p.special ? @"*" : @""]];
+    PALOG(@"[심기] 꽃잎 재고: %@", [bits componentsJoinedByString:@" "]);
 }
 
 NSString *pkPlantPass(void) {
@@ -67,41 +55,36 @@ NSString *pkPlantPass(void) {
     NSArray<PKPetal *> *petals = pkPetalList();
     long long plain = 0, special = 0;
     for (PKPetal *p in petals) (p.special ? special : plain) += p.num;
-    PKPetal *best = biggestPlain(petals);
+    PKPetal *best = pkBiggestPlain(petals);
+    logCensus(petals);
 
-    static NSTimeInterval lastCensus = -1e9;
-    if (pkMono() - lastCensus > 300) {                       // what we hold, every 5 min
-        lastCensus = pkMono();
-        NSMutableArray *bits = [NSMutableArray array];
-        for (PKPetal *p in petals)
-            [bits addObject:[NSString stringWithFormat:@"c%dk%d[%@]x%d%@", p.color, p.kind, p.flowerName, p.num, p.special ? @"*" : @""]];
-        PALOG(@"[심기] 꽃잎 재고: %@", [bits componentsJoinedByString:@" "]);
-    }
+    PKPlantInputs in = { live, gPlantingId, pkMono(), gLastStart, gLastStop };
+    PKPlantDecision d = pkPlantDecide(petals, in);
+    if (d.forgetOurStack) gPlantingId = nil;
+    PKPetal *cur = gPlantingId ? pkStackById(petals, gPlantingId) : nil;
 
-    if (live) {
-        PKPetal *cur = gPlantingId ? stackById(petals, gPlantingId) : nil;
-        if (!gPlantingId)
+    switch (d.action) {
+        case PKPlantLeaveAlone:
             return [NSString stringWithFormat:@"🌱 심는 중 — 직접 시작한 세션이라 그대로 둠 (일반 %lld, 특수 %lld)", plain, special];
-        if (cur && best && ![best.itemId isEqualToString:cur.itemId] && best.num >= cur.num + kSwitchMargin) {
-            if (pkMono() - gLastStop < kStopGap) return @"🌱 전환 대기 (중지 요청 후)";
+        case PKPlantKeep:
+            return [NSString stringWithFormat:@"🌱 심는 중 %@ %d장 (최다 %d장, 일반 %lld, 특수 %lld)",
+                    cur ? [NSString stringWithFormat:@"색%d", cur.color] : @"?", cur ? cur.num : 0, best ? best.num : 0, plain, special];
+        case PKPlantSwitchWait:
+            return @"🌱 전환 대기 (중지 요청 후)";
+        case PKPlantSwitch: {
             gLastStop = pkMono();
             BOOL ok = NO;
             pkInvokeEx(pkMethodOf(plant, "StopPlanting", 0), plant, NULL, &ok);
             PALOG(@"[심기] 전환: 현재 %@(색%d k%d %d장) → %@(색%d k%d %d장) 차이 %d ≥ %d, 중지 요청 ok=%d",
                   cur.itemId, cur.color, cur.kind, cur.num, best.itemId, best.color, best.kind, best.num,
-                  best.num - cur.num, kSwitchMargin, ok);
+                  best.num - cur.num, kPlantSwitchMargin, ok);
             return ok ? @"🌱 더 많은 꽃잎으로 전환 — 세션 중지 요청" : @"🌱 세션 중지 실패";
         }
-        return [NSString stringWithFormat:@"🌱 심는 중 %@ %d장 (최다 %d장, 일반 %lld, 특수 %lld)",
-                cur ? [NSString stringWithFormat:@"색%d", cur.color] : @"?", cur ? cur.num : 0, best ? best.num : 0, plain, special];
+        case PKPlantNoPlain:  return [NSString stringWithFormat:@"🌱 일반 꽃잎 없음 (특수 %lld 보존)", special];
+        case PKPlantNoStack:  return @"🌱 쓸 꽃잎 없음";
+        case PKPlantStartWait: return @"🌱 시작 요청 후 대기 중";
+        case PKPlantStart: break;
     }
-
-    // Not live. Forget the stack we were spending — unless we only just asked
-    // to start and the session has not gone live yet.
-    if (pkMono() - gLastStart > kAdoptGap) gPlantingId = nil;
-    if (plain <= 0) return [NSString stringWithFormat:@"🌱 일반 꽃잎 없음 (특수 %lld 보존)", special];
-    if (!best) return @"🌱 쓸 꽃잎 없음";
-    if (pkMono() - gLastStart < kStartGap) return @"🌱 시작 요청 후 대기 중";
 
     void *m = pkMethodOf(plant, "StartPlantingWithConfirmationAsync", 2);
     if (!m) return @"StartPlantingWithConfirmationAsync 없음";
