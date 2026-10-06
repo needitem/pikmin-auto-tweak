@@ -74,7 +74,7 @@ static void syncSideEffects(void) {
     // the pipeline is running. The cap is constant on purpose — the phone is in
     // the player's hand most of the time, so a cap that lifts on touch would
     // never be on.
-    pkSetCameraSuppress(camera);
+    pkSetCameraSuppress(camera && [PKSettings boolForKey:kSettingCamSuppress]);
     pkApplyFrameRate(YES);
 }
 

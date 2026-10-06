@@ -43,7 +43,6 @@ typedef const char*  (*t_field_get_name)(void*);
 typedef size_t       (*t_image_get_class_count)(const void*);
 typedef const void*  (*t_image_get_class)(const void*, size_t);
 typedef const char*  (*t_class_get_namespace)(void*);
-typedef const void*  (*t_method_get_return_type)(const void*);
 typedef void         (*t_field_static_get_value)(void*, void*);
 typedef const void*  (*t_class_get_type)(void*);
 typedef void*        (*t_type_get_object)(const void*);
@@ -84,7 +83,6 @@ static t_field_get_name f_field_get_name;
 static t_image_get_class_count f_image_get_class_count;
 static t_image_get_class f_image_get_class;
 static t_class_get_namespace f_class_get_namespace;
-static t_method_get_return_type f_method_get_return_type;
 static t_field_static_get_value f_field_static_get_value;
 static t_class_get_type f_class_get_type;
 static t_type_get_object f_type_get_object;
@@ -97,22 +95,6 @@ void *pkRawFieldOffsetByName(void *cls, const char *name, ptrdiff_t *off) {
     if (!cls || !name || !f_class_get_field_from_name) return NULL;
     void *fld = f_class_get_field_from_name(cls, name);
     if (fld && off) *off = (ptrdiff_t)f_field_get_offset(fld);
-    return fld;
-}
-
-void *pkRefFieldOffsetByName(void *cls, const char *name, ptrdiff_t *off) {
-    if (!cls || !name || !f_class_get_field_from_name || !f_field_get_type || !f_type_get_type || !f_field_get_flags) return NULL;
-    void *fld = f_class_get_field_from_name(cls, name);
-    if (!fld || (f_field_get_flags(fld) & 0x10)) return NULL;               // missing, or static
-    const void *t = f_field_get_type(fld);
-    int ty = t ? f_type_get_type(t) : 0;
-    BOOL isRef = ty == 0x0e || ty == 0x12 || ty == 0x1c;                    // string, class, object
-    if (ty == 0x15 && f_class_from_type && f_class_is_valuetype) {          // Foo<T>: a reference unless it is a struct
-        void *gk = f_class_from_type(t);
-        isRef = gk && !f_class_is_valuetype(gk);
-    }
-    if (!isRef) return NULL;
-    if (off) *off = (ptrdiff_t)f_field_get_offset(fld);
     return fld;
 }
 
@@ -164,7 +146,6 @@ BOOL pkRuntimeReady(void) {
     SYM(f_image_get_class_count, "il2cpp_image_get_class_count");
     SYM(f_image_get_class, "il2cpp_image_get_class");
     SYM(f_class_get_namespace, "il2cpp_class_get_namespace");
-    SYM(f_method_get_return_type, "il2cpp_method_get_return_type");
     SYM(f_field_static_get_value, "il2cpp_field_static_get_value");
     SYM(f_class_get_type, "il2cpp_class_get_type");
     SYM(f_type_get_object, "il2cpp_type_get_object");
@@ -349,6 +330,13 @@ NSString *pkStr(void *s) {
     if (len < 0 || len > 4096) return nil;
     return [NSString stringWithCharacters:(const unichar *)((char *)s + 0x14) length:(NSUInteger)len];
 }
+int pkStrCopy(void *s, unichar *out, int cap) {
+    if (!s || !out) return 0;
+    int len = *(int *)((char *)s + 0x10);
+    if (len <= 0 || len > cap) return 0;
+    memcpy(out, (char *)s + 0x14, (size_t)len * sizeof(unichar));
+    return len;
+}
 void *pkNewString(NSString *s) { return s ? f_string_new(s.UTF8String) : NULL; }
 
 void *pkNewObj(void *cls) {
@@ -459,55 +447,6 @@ void *pkFindObjectOfClass(void *cls) {
     void **items = (void **)((char *)arr + 0x20);
     for (size_t i = 0; i < n && i < 64; i++) if (items[i]) return items[i];
     return NULL;
-}
-
-static NSString *typeText(const void *t) {
-    if (!t || !f_type_get_name) return @"?";
-    char *n = f_type_get_name(t);
-    NSString *s = n ? @(n) : @"?";
-    if (n && f_free) f_free(n);
-    return s;
-}
-
-NSString *pkDescribeClass(void *cls) {
-    if (!cls || !f_class_get_name) return @"(no class)";
-    void *parent = f_class_get_parent ? f_class_get_parent(cls) : NULL;
-    NSMutableString *out = [NSMutableString stringWithFormat:@"%s.%s : %s", f_class_get_namespace ? f_class_get_namespace(cls) : "",
-                            f_class_get_name(cls), parent ? f_class_get_name(parent) : "-"];
-    [out appendString:@" | fields:"];
-    if (f_class_get_fields && f_field_get_name && f_field_get_type) {
-        void *it = NULL, *fld; int n = 0;
-        while ((fld = f_class_get_fields(cls, &it)) && n++ < 120)
-            [out appendFormat:@" %s%s@0x%zx:%@;", (f_field_get_flags && (f_field_get_flags(fld) & 0x10)) ? "static " : "",
-             f_field_get_name(fld) ?: "?", (size_t)f_field_get_offset(fld), typeText(f_field_get_type(fld))];
-    }
-    [out appendString:@" | methods:"];
-    if (f_class_get_methods && f_method_get_name && f_method_get_param_count) {
-        void *it = NULL, *m; int n = 0;
-        while ((m = f_class_get_methods(cls, &it)) && n++ < 160) {
-            NSMutableArray *ps = [NSMutableArray array];
-            uint32_t pc = f_method_get_param_count(m);
-            for (uint32_t i = 0; i < pc && f_method_get_param; i++) [ps addObject:typeText(f_method_get_param(m, i))];
-            [out appendFormat:@" %@ %s(%@);", f_method_get_return_type ? typeText(f_method_get_return_type(m)) : @"?",
-             f_method_get_name(m) ?: "?", [ps componentsJoinedByString:@","]];
-        }
-    }
-    return out;
-}
-
-NSString *pkDescribeFields(void *cls) {
-    if (!cls || !f_class_get_fields || !f_field_get_name || !f_field_get_type || !f_type_get_name) return @"(reflection unavailable)";
-    NSMutableArray *bits = [NSMutableArray array];
-    for (void *k = cls; k && bits.count < 80; k = f_class_get_parent ? f_class_get_parent(k) : NULL) {
-        void *iter = NULL, *fld;
-        while ((fld = f_class_get_fields(k, &iter))) {
-            if (f_field_get_flags && (f_field_get_flags(fld) & 0x10)) continue;
-            char *tn = f_type_get_name(f_field_get_type(fld));
-            [bits addObject:[NSString stringWithFormat:@"%s@0x%zx:%s", f_field_get_name(fld) ?: "?", (size_t)f_field_get_offset(fld), tn ?: "?"]];
-            if (tn && f_free) f_free(tn);
-        }
-    }
-    return [bits componentsJoinedByString:@"; "];
 }
 
 // ---------- hooks / GC ----------

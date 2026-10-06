@@ -23,7 +23,9 @@ void pkNectarPlainByColor(long long out[8]);
 BOOL pkNectarIsSpecial(NSString *flowerName, int honeyFlowerKind);
 
 // The player's manual feed reveals which stack they mean. Any thread.
-void pkNoteHandFed(NSString *itemId);
+// From a hook (any thread): the nectar item id the player just fed by hand, copied
+// as raw UTF-16 — no allocation, no il2cpp call. The feed pass picks it up.
+void pkNoteHandFedRaw(void *il2cppItemIdString);
 // Pin the special nectar to spend from the player's own choices (hand feed +
 // the reel selection). Main thread; call before reading the pin.
 void pkNectarSyncSelection(void);

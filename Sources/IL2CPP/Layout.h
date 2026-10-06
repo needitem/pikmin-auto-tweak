@@ -82,7 +82,6 @@
     X(Seed_planted,   "plantedTimeMs_",                  NULL,      0x60) \
     X(Seed_type,      "seedType_",                       NULL,      0x18) \
     X(Seed_pikmin,    "pikmin_",                         NULL,      0x68) \
-    X(Seed_weight,    "weightGrams_",                    NULL,      0x80) \
     X(Seed_event,     "eventId_",                        NULL,      0x88) \
     X(Seed_treasure,  "treasureType_",                   NULL,      0x90) \
     X(Planter_slots,  "slot_",                           NULL,      0x20) \
@@ -113,12 +112,6 @@
     X(SetSeed_id,     "seedId_",                         NULL,      0x18) \
     X(SetSeed_point,  "point_",                          NULL,      0x20) \
     /* request logging (debug hooks only) */ \
-    X(FeedReq_ids,    "pikminId_",                       NULL,      0x18) \
-    X(FeedReq_item,   "itemId_",                         NULL,      0x20) \
-    X(FeedReq_num,    "numItems_",                       NULL,      0x28) \
-    X(PickReq_ids,    "pikminId_",                       NULL,      0x18) \
-    X(SeedReq_id,     "seedId_",                         NULL,      0x18) \
-    X(SeedReq_point,  "point_",                          NULL,      0x20) \
     /* collections (name only; the corlib picks the spelling) */ \
     X(List_items,     "_items",                          NULL,      0x10) \
     X(List_size,      "_size",                           NULL,      0x18) \

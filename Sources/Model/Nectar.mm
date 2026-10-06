@@ -86,20 +86,31 @@ void pkNectarPlainByColor(long long out[8]) {
 }
 
 // ---------- the player's choice ----------
+// The hook that notices a hand feed runs inside the game, so it only copies the
+// id's UTF-16 into a fixed buffer under a short lock; the string object is made
+// here, on the main thread, when the feed pass asks.
+static const int kFedCap = 96;
 static os_unfair_lock gFedLock = OS_UNFAIR_LOCK_INIT;
-static NSString *gHandFed = nil;
+static unichar gFedChars[kFedCap];
+static int gFedLen = 0;
 
-void pkNoteHandFed(NSString *itemId) {
-    if (!itemId.length) return;
+void pkNoteHandFedRaw(void *il2cppItemIdString) {
+    unichar tmp[kFedCap];
+    int n = pkStrCopy(il2cppItemIdString, tmp, kFedCap);
+    if (n <= 0) return;
     os_unfair_lock_lock(&gFedLock);
-    gHandFed = itemId;
+    memcpy(gFedChars, tmp, (size_t)n * sizeof(unichar));
+    gFedLen = n;
     os_unfair_lock_unlock(&gFedLock);
 }
 static NSString *takeHandFed(void) {
+    unichar tmp[kFedCap];
     os_unfair_lock_lock(&gFedLock);
-    NSString *s = gHandFed; gHandFed = nil;
+    int n = gFedLen;
+    memcpy(tmp, gFedChars, (size_t)n * sizeof(unichar));
+    gFedLen = 0;
     os_unfair_lock_unlock(&gFedLock);
-    return s;
+    return n > 0 ? [NSString stringWithCharacters:tmp length:(NSUInteger)n] : nil;
 }
 
 // The chosen stack, however we came by it: its item id pins the exact stack

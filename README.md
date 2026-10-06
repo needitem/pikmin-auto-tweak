@@ -22,7 +22,7 @@ Dependencies point downward only; each module has one reason to change.
 - **No game pointer outlives a pass.** Snapshots carry ids as `NSString`; managed strings are rebuilt where a request is built. Captured singletons are pinned with GC handles and replaced when the game hands over a new instance.
 - **State reads are shared per frame** (`Support/Frame.h`). One scheduler tick (or one pass run from a switch) is a frame: the roster, squad, nectar and petal scans happen once and are shared by every pass in it, then dropped when the frame ends. Outside a frame nothing is cached. A pass that changes statuses calls `pkRosterInvalidate()`.
 - **Fields are found by name** (`Layout.h`); the dump's offsets are a fallback only while the game build is unchanged. After a game update, unresolved fields fail closed and the scheduler pauses (`[layout]` lines in the log) instead of reading garbage.
-- **Hooks capture, passes act.** Production hooks never call back into il2cpp from a game callback. Request-logging hooks exist only with `pa_debug`.
+- **Hooks capture, passes act.** A hook runs inside the game, on any thread, so it only remembers a pointer; the main thread pins and adopts it between passes. Nothing in a hook calls il2cpp, allocates or logs.
 - **Every fire-and-forget request goes through `PKBackoff`** — no resend before the game can answer, longer waits when the target's state did not move.
 - **No UI, no switches.** Every feature in `Features.mm` always runs; there is no overlay and nothing to toggle.
 - **Foreground only.** Passes, the finder and the heartbeat run only while the app is active. Nothing in the tweak keeps the process alive in the background (no background location session); location updates stop when the app is backgrounded.
@@ -35,7 +35,6 @@ Dependencies point downward only; each module has one reason to change.
 |---|---|
 | `pa_camsuppress` | keep the camera still while automating (default on) |
 | `pa_fps` | frame-rate cap while automating (5–60; default 0 = no cap) |
-| `pa_debug` | install request-logging hooks (needs a relaunch) |
 | `pa_special`, `pa_special_id` | pinned special nectar (set from the game's own selection) |
 
 Logs: `Documents/pa.log` (rotates at 1 MB to `pa.log.1`). `PKLOGC` formats its message lazily, so a status line whose key logged in the last two seconds costs nothing. Per-pass cost is in the `[hb]` line every minute as `total-ms/calls`.

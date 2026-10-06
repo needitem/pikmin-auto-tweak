@@ -5,7 +5,6 @@
 #import "Layout.h"
 #import "Location.h"
 #import "Log.h"
-#import "Probe.h"
 #import "Roster.h"
 #import "SeedValue.h"
 #import "TroopPlan.h"
@@ -41,15 +40,12 @@ NSString *pkSeedPass(void) {
     NSMutableArray<PKSeed *> *ripe = [NSMutableArray array], *waiting = [NSMutableArray array];
     NSMutableSet<NSString *> *alive = [NSMutableSet set];
     __block int nPlanted = 0, nSeeds = 0;
-    NSMutableArray<NSValue *> *protos = [NSMutableArray array];
     pkListEach(pkInvList("GetPikminSeedList"), ^(void *item) {
         void *proto = pkItemProto(item);
         NSString *sid = pkItemId(item);
         if (!proto || !sid.length) return;
         nSeeds++;
         [alive addObject:sid];
-        if (nSeeds == 1) pkProbeSeedItem(item);
-        [protos addObject:[NSValue valueWithPointer:proto]];
         PKSeed *s = [PKSeed new];
         s.sid = sid;
         s.traits = pkSeedTraits(proto);
@@ -67,7 +63,6 @@ NSString *pkSeedPass(void) {
         }
     });
     [backoff() pruneKeeping:alive];
-    pkProbeSeedTable(protos);
 
     // 1) Pluck ripe seedlings — one PullPikmin request, up to 5 ids.
     int pulled = 0;

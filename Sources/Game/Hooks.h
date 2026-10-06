@@ -1,7 +1,7 @@
-// Method hooks. Production hooks only CAPTURE singletons (and note two
-// user actions); they never call back into il2cpp from inside a game callback.
-// Request-logging hooks exist for debugging and are installed only when
-// `defaults write ... pa_debug -bool YES` is set.
+// Method hooks. A hook runs inside the game, on whatever thread made the call,
+// so it does the least possible: remember a singleton's pointer (and note a hand
+// feed, and swallow one camera move). No lock beyond a tiny one, no allocation, no
+// il2cpp call, no logging; everything else happens later on the main thread.
 #pragma once
 #import <Foundation/Foundation.h>
 

@@ -13,7 +13,6 @@
 @end
 
 // Keys. Every automation pass always runs; these only tune behaviour.
-extern NSString * const kSettingDebug;        // pa_debug: install request-logging hooks
 extern NSString * const kSettingCamSuppress;  // pa_camsuppress: keep the camera still while automating
 extern NSString * const kSettingFps;          // pa_fps: frame-rate cap while automating (0/unset = none)
 extern NSString * const kSettingSpecial;      // pa_special: pinned special-nectar flower name

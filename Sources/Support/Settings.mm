@@ -2,7 +2,6 @@
 #import <os/lock.h>
 
 
-NSString * const kSettingDebug       = @"pa_debug";
 NSString * const kSettingCamSuppress = @"pa_camsuppress";
 NSString * const kSettingFps         = @"pa_fps";
 NSString * const kSettingSpecial     = @"pa_special";
