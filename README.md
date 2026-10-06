@@ -9,13 +9,25 @@ Dependencies point downward only; each module has one reason to change.
 
 | Layer | Path | Responsibility |
 |---|---|---|
-| App | `Sources/App` | `Tweak.mm` entry point · `Features.mm` registry (the one place to add a feature) · `Scheduler` (when passes run) · `FrameRate` |
-| Passes | `Sources/Passes` | One decision procedure per feature (`FeedPass`, `HarvestPass`, …) + the GPS Wander dumps |
-| Rpc | `Sources/Rpc` | `RpcClient`: builds and sends request protos; the only module that knows request shapes |
-| Model | `Sources/Model` | Read-only snapshots of game state: roster, troop, nectar, petals, map objects, expeditions, location |
-| Game | `Sources/Game` | Captured singletons (`GameContext`), hook table (`Hooks`), enum constants |
-| IL2CPP | `Sources/IL2CPP` | Cached runtime bridge, the field table with name-based offset resolution (`Layout`), collection readers |
-| Support | `Sources/Support` | Log, clocks, `PKBackoff`, settings |
+| App | `Sources/App` | `Tweak.mm` entry point · `Features.mm` registry (the one place to add a feature) · `Scheduler` (when each pass runs) · `Governor` (may work run now: startup quiet, hold-off while the main thread is busy; pure) · `Maintenance` (1 s housekeeping) · `Heartbeat` (the `[hb]`/`[hb2]` log lines) · `SideEffects` (frame cap, camera) · `AppState` |
+| Passes | `Sources/Passes` | One procedure per feature (`FeedPass`, `HarvestPass`, `ExpeditionPass`, …), each reading the game, deciding through a Model plan, and sending; plus the GPS Wander dumps (`MapDump`, `RosterDump`) |
+| Rpc | `Sources/Rpc` | `RpcClient`: builds and sends request protos, the only module that knows request shapes · `RpcPacer`: queues bursty requests and releases them one at a time |
+| Model | `Sources/Model` | Snapshots of game state (roster, troop, nectar, petals, map objects, expeditions, seeds, location) and the **pure decisions** made from them: `TroopPlan`, `ExpeditionPool`, `FeedPlan`, `PlantPlan`, `SeedValue`, `RosterReport` |
+| Game | `Sources/Game` | Captured singletons (`GameContext`), hook table (`Hooks`), the singleton finder, enum constants |
+| IL2CPP | `Sources/IL2CPP` | `Il2cppApi` (raw entry points, internal) · `Runtime` (readiness gate, cached lookups, invoke, strings, hooks, GC) · `Reflection` (fields, methods, enums, classes by name) · `Layout` (the field table with name-based offsets) · `Collections` |
+| Support | `Sources/Support` | Log, clocks, `PKBackoff`, settings, `ChangeGate`, `Bisect`, `Geo`, `PassTimings`, `CpuStats`, frame sharing |
+
+Anything that decides is pure (plain values in, a result out) and lives in Model or Support, where it is tested on the host; anything that touches the game is a thin layer around it.
+
+## Tests
+
+The pure logic is checked on the Mac, without the game:
+
+```sh
+sh tests/run.sh
+```
+
+`tests/sources.txt` lists the sources under test (Foundation only); each `tests/test_*.mm` holds the cases, `TestKit` the helpers. The shipped build never defines `PK_TEST`; the tests define it to drive the clock by hand.
 
 ## Rules the code follows
 

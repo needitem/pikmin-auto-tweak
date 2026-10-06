@@ -11,3 +11,4 @@ Model/ExpeditionPool.mm
 Support/Bisect.mm
 Model/FeedPlan.mm
 Model/PlantPlan.mm
+Support/Geo.mm

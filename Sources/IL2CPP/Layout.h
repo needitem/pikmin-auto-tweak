@@ -102,9 +102,6 @@
     X(Poi_app,        "appearance_",                     NULL,      0x20) \
     X(Poi_bloomed,    "bloomedTimeMs_",                  NULL,      0x40) \
     X(Poi_visited,    "visitRewardReceived_",            NULL,      0x48) \
-    X(Ovl_state,      "state_",                          NULL,      0x18) \
-    X(Ovl_flower,     "flower_",                         NULL,      0x20) \
-    X(Ovl_bloom,      "lastBloomingMs_",                 NULL,      0x28) \
     /* requests we fill by field (no setter is used) */ \
     X(Complete_taskId,"pikminTaskId_",                   NULL,      0x18) \
     X(Claim_id,       "mapObjectId_",                    NULL,      0x18) \

@@ -20,6 +20,7 @@ void test_feed_bud_stacks_fallback_to_plain(void); void test_feed_allocate_respe
 void test_feed_allocate_shared_budget(void); void test_feed_allocate_edges(void);
 void test_plant_biggest_plain(void); void test_plant_leave_hand_started(void); void test_plant_keep_and_switch(void);
 void test_plant_switch_waits_after_stop(void); void test_plant_start_rules(void); void test_plant_forget_stale_start(void);
+void test_geo_distance(void);
 void test_hash(void); void test_changegate(void);
 void test_roster_json_is_valid_and_complete(void); void test_roster_json_escapes_names(void);
 void test_roster_json_handles_bad_numbers_and_empty(void); void test_roster_summary(void); void test_roster_signature(void);
@@ -48,6 +49,7 @@ int main(void) {
         RUN(test_feed_allocate_shared_budget); RUN(test_feed_allocate_edges);
         RUN(test_plant_biggest_plain); RUN(test_plant_leave_hand_started); RUN(test_plant_keep_and_switch);
         RUN(test_plant_switch_waits_after_stop); RUN(test_plant_start_rules); RUN(test_plant_forget_stale_start);
+        RUN(test_geo_distance);
         RUN(test_hash); RUN(test_changegate);
         RUN(test_roster_json_is_valid_and_complete); RUN(test_roster_json_escapes_names);
         RUN(test_roster_json_handles_bad_numbers_and_empty); RUN(test_roster_summary); RUN(test_roster_signature);

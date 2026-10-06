@@ -91,10 +91,6 @@ static void *classSlow(const char *ns, const char *name) {
 }
 
 void *pkClassOf(void *obj) { return obj ? f_object_get_class(obj) : NULL; }
-NSString *pkClassName(void *obj) {
-    void *k = pkClassOf(obj);
-    return (k && f_class_get_name) ? @(f_class_get_name(k) ?: "?") : nil;
-}
 
 static void *methodSlow(void *cls, const char *name, int argc);
 void *pkMethod(void *cls, const char *name, int argc) {

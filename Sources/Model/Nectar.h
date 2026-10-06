@@ -17,5 +17,3 @@
 // with a positive held count.
 NSArray<PKNectar *> *pkNectarList(void);
 
-// Plain (no flower kind) predicted nectar by colour index 1..4.
-void pkNectarPlainByColor(long long out[8]);

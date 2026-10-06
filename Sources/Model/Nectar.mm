@@ -72,9 +72,3 @@ NSArray<PKNectar *> *pkNectarList(void) {
                              conf[1], conf[2], conf[3], conf[4], conf[5], pred[1], pred[2], pred[3], pred[4], pred[5]]));
     return out;
 }
-
-void pkNectarPlainByColor(long long out[8]) {
-    memset(out, 0, 8 * sizeof(long long));
-    for (PKNectarRow *r in rows())
-        if (r.type >= 0 && r.type < 8 && r.predicted > 0 && r.flowerName.length == 0) out[r.type] += r.predicted;
-}

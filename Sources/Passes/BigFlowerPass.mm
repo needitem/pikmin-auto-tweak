@@ -1,6 +1,7 @@
 #import "Passes.h"
 #import "Backoff.h"
 #import "GameConstants.h"
+#import "Geo.h"
 #import "GameContext.h"
 #import "Location.h"
 #import "Log.h"
@@ -20,13 +21,6 @@ static const double kRangeM = 100.0;
 static const double kSendM = 65.0;
 static const NSTimeInterval kRetry = 45.0;
 static const NSTimeInterval kMaxLocationAge = 300.0;   // a spoofed fix may simply not change while standing still
-
-static double distanceM(double lat1, double lng1, double lat2, double lng2) {
-    const double r = 6371000.0, p = M_PI / 180.0;
-    double dlat = (lat2 - lat1) * p, dlng = (lng2 - lng1) * p;
-    double a = sin(dlat / 2) * sin(dlat / 2) + cos(lat1 * p) * cos(lat2 * p) * sin(dlng / 2) * sin(dlng / 2);
-    return 2 * r * atan2(sqrt(a), sqrt(1 - a));
-}
 
 static PKBackoff *backoff(void) {
     static PKBackoff *b;
@@ -54,7 +48,7 @@ NSString *pkBigFlowerPass(void) {
         if (o.state != PK_FS_FLOWER && o.state != PK_FS_FULL_BLOOM) continue;
         nBloom++;
         if (o.visited) continue;
-        double d = distanceM(mlat, mlng, o.lat, o.lng);
+        double d = pkDistanceM(mlat, mlng, o.lat, o.lng);
         if (d > kRangeM) continue;
         nNear++;
         if (d > kSendM || sent >= 2) continue;               // wait until closer / two per pass

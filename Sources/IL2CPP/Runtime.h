@@ -30,7 +30,6 @@ BOOL pkRuntimeReady(void);   // resolves the API once; false until armed and Uni
 
 void *pkClass(const char *ns, const char *name);                 // cached
 void *pkClassOf(void *obj);
-NSString *pkClassName(void *obj);                                // "Boolean", "ReactiveProperty`1", …
 void *pkMethod(void *cls, const char *name, int argc);           // cached
 void *pkMethodOf(void *obj, const char *name, int argc);
 
