@@ -10,6 +10,9 @@ void test_governor_held_ticks_counted(void);
 void test_pacer_one_at_a_time_in_order(void); void test_pacer_holds_while_busy(void);
 void test_pacer_stale_request_is_forced(void); void test_pacer_stats(void);
 void test_passtimings(void);
+void test_hash(void); void test_changegate(void);
+void test_roster_json_is_valid_and_complete(void); void test_roster_json_escapes_names(void);
+void test_roster_json_handles_bad_numbers_and_empty(void); void test_roster_summary(void); void test_roster_signature(void);
 
 #define RUN(fn) do { int before = gFailures; fn(); printf("%s %s\n", gFailures == before ? "ok  " : "FAIL", #fn); } while (0)
 
@@ -25,6 +28,9 @@ int main(void) {
         RUN(test_pacer_one_at_a_time_in_order); RUN(test_pacer_holds_while_busy);
         RUN(test_pacer_stale_request_is_forced); RUN(test_pacer_stats);
         RUN(test_passtimings);
+        RUN(test_hash); RUN(test_changegate);
+        RUN(test_roster_json_is_valid_and_complete); RUN(test_roster_json_escapes_names);
+        RUN(test_roster_json_handles_bad_numbers_and_empty); RUN(test_roster_summary); RUN(test_roster_signature);
         printf("\n%d checks, %d failed\n", gChecks, gFailures);
     }
     return gFailures ? 1 : 0;

@@ -3,3 +3,5 @@ Support/PassTimings.mm
 Model/TroopPlan.mm
 App/Governor.mm
 Rpc/RpcPacer.mm
+Support/ChangeGate.mm
+Model/RosterReport.mm
