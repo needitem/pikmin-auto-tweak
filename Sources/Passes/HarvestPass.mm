@@ -16,6 +16,20 @@ static PKBackoff *backoff(void) {
     return b;
 }
 
+// The game's own scheduler (SchedulePickPikminFlowerBatchedRequest) queues into
+// its own throttled batches and dribbles a few Pikmin at a time — 37 flowers
+// took over a minute — so it is only the fallback when the direct request
+// cannot be built.
+static void gameRoute(NSArray<NSString *> *pids) {
+    void *action = pkAction();
+    void *sched = action ? pkMethodOf(action, "SchedulePickPikminFlowerBatchedRequest", 1) : NULL;
+    if (!sched) return;
+    for (NSString *pid in pids) {
+        void *a[1] = { pkNewString(pid) };
+        pkInvoke(sched, action, a);
+    }
+}
+
 NSString *pkHarvestPass(void) {
     if (!pkMgr() || !pkRpc()) return @"게임/서버 준비 대기";
     NSArray<PKPikmin *> *squad = pkSquad();
@@ -51,25 +65,17 @@ NSString *pkHarvestPass(void) {
     // (SchedulePickPikminFlowerBatchedRequest) queues into its own throttled
     // batches and dribbles a few Pikmin at a time — 37 flowers took over a minute
     // — so it is only the fallback when the direct request cannot be built.
+    // The requests are queued and sent a quarter of a second apart (RpcClient),
+    // not all in this tick: ninety Pikmin is eighteen requests, and the game
+    // answers each one on its main thread.
     int sent = 0;
     for (NSUInteger i = 0; i < ids.count; i += 5) {
         NSArray<PKPikmin *> *chunk = [ids subarrayWithRange:NSMakeRange(i, MIN((NSUInteger)5, ids.count - i))];
         NSMutableArray<NSString *> *pids = [NSMutableArray array];
         for (PKPikmin *p in chunk) [pids addObject:p.pid];
-        if (pkRpcPickFlowers(pids)) { sent += (int)chunk.count; for (PKPikmin *p in chunk) note(p); }
+        pkRpcDefer(^{ if (!pkRpcPickFlowers(pids)) gameRoute(pids); });
+        sent += (int)chunk.count;
+        for (PKPikmin *p in chunk) note(p);
     }
-    if (!sent) {
-        void *action = pkAction();
-        void *sched = action ? pkMethodOf(action, "SchedulePickPikminFlowerBatchedRequest", 1) : NULL;
-        if (sched) {
-            for (PKPikmin *p in ids) {
-                void *a[1] = { pkNewString(p.pid) };
-                pkInvoke(sched, action, a);
-                note(p);
-            }
-            return [NSString stringWithFormat:@"🌸 수확(게임경로 대체) %lu마리 / 꽃잎 %lld", (unsigned long)ids.count, pickable];
-        }
-    }
-    return sent ? [NSString stringWithFormat:@"🌸 수확 %d마리 / 꽃잎 %lld (자라는 중 %lu)", sent, pickable, (unsigned long)growing]
-                : @"🌸 수확 전송 실패";
+    return [NSString stringWithFormat:@"🌸 수확 %d마리 / 꽃잎 %lld (자라는 중 %lu)", sent, pickable, (unsigned long)growing];
 }

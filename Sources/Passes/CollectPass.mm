@@ -62,11 +62,11 @@ NSString *pkCollectPass(void) {
     for (NSString *tid in claimable) {
         if (![backoff() ready:tid]) continue;
         int tries = [backoff() tries:tid];
-        if (pkRpcCompleteTask(tid)) {
-            [backoff() recordSend:tid];
-            sent++;
-            PALOG(@"[collect] 수집 요청 task=%@%@", tid, tries ? [NSString stringWithFormat:@" (%d번째)", tries + 1] : @"");
-        }
+        NSString *taskId = tid;
+        pkRpcDefer(^{ pkRpcCompleteTask(taskId); });                // queued and paced, see RpcClient
+        [backoff() recordSend:tid];
+        sent++;
+        PALOG(@"[collect] 수집 요청 task=%@%@", tid, tries ? [NSString stringWithFormat:@" (%d번째)", tries + 1] : @"");
         if (sent >= 5) break;                                   // a handful per pass
     }
 

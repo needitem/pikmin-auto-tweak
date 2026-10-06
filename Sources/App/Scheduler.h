@@ -11,3 +11,7 @@ void pkSchedulerStart(void);
 // fixes) may call it without double-firing.
 void pkSchedulerTick(void);
 
+// NO for a few seconds after the main thread was seen running late. Requests
+// that would pile on top of a stall wait for it (see RpcClient's pacing).
+BOOL pkMainThreadCalm(void);
+

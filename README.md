@@ -26,6 +26,7 @@ Dependencies point downward only; each module has one reason to change.
 - **Every fire-and-forget request goes through `PKBackoff`** — no resend before the game can answer, longer waits when the target's state did not move.
 - **No UI, no switches.** Every feature in `Features.mm` always runs; there is no overlay and nothing to toggle.
 - **Foreground only.** Passes, the finder and the heartbeat run only while the app is active. Nothing in the tweak keeps the process alive in the background (no background location session); location updates stop when the app is backgrounded.
+- **Paced and self-limiting.** The game answers every request on its main thread, so requests that arrive in bursts (harvest, feed, collect) are queued and released a quarter of a second apart (`pkRpcDefer`), and when the 1 s timer is seen firing late the passes and the queue hold off for a few seconds (`pkMainThreadCalm`). The first 75 s after launch are left to the game loading. The `[hb2]` heartbeat line shows the queue and the held ticks.
 - **One pass, one file, one status line.** Pacing lives only in `Features.mm` / `Scheduler.mm`.
 
 ## Switches (`defaults` on the app)

@@ -127,7 +127,8 @@ NSString *pkFeedPass(void) {
                 NSArray<PKPikmin *> *chunk = [targets subarrayWithRange:NSMakeRange(next, n)];
                 NSMutableArray<NSString *> *pids = [NSMutableArray array];
                 for (PKPikmin *p in chunk) [pids addObject:p.pid];
-                if (!pkRpcFeed(pids, stack.itemId, 1)) return done;
+                NSString *itemId = stack.itemId;
+                pkRpcDefer(^{ pkRpcFeed(pids, itemId, 1); });          // queued and paced, see RpcClient
                 for (PKPikmin *p in chunk) [backoff() recordSend:p.pid signature:signatureOf(p)];
                 remaining[stack.itemId] = @(remaining[stack.itemId].intValue - (int)n);
                 done += (int)n; next += n;
