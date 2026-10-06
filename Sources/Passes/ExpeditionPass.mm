@@ -1,5 +1,6 @@
 #import "Passes.h"
 #import "Backoff.h"
+#import "ExpeditionPool.h"
 #import "Expeditions.h"
 #import "GameConstants.h"
 #import "GameContext.h"
@@ -52,77 +53,25 @@ static PKBackoff *refused(void) {
     return b;
 }
 
-// Who may be sent. The rules the game itself applies (PikminInventoryTools.
-// ReservingPikminForTroop): troop members ARE sendable; the game only holds back
-// enough of them to keep the troop at its minimum size:
-//   needToReserve = count(eligible in troop) - troopCount + minTroop
-// Busy Pikmin (on a task) are the only hard exclusion; favourites stay home.
-//
-// On top of that, the roster strategy (Model/TroopPlan.mm) decides WHO is
-// expendable. A Pikmin away on an expedition is neither walking in the troop
-// nor available for a mushroom, so:
-//  * whoever the troop plan wants in the troop right now is never sent;
-//  * of the rest, ordinary Pikmin go first, strongest first (they carry more,
-//    so the smallest party that can start is smaller);
-//  * each colour's elite are the mushroom force and go last, weakest first,
-//    only if the others cannot make the party.
-// (The old rule sent only 4-heart-and-up Pikmin, i.e. exactly the mushroom
-// force.)
+// Who may be sent: the policy is Model/ExpeditionPool; this gathers what the game
+// says (the troop, its minimum size) and the troop plan's current answer.
 static NSArray<PKPikmin *> *candidates(NSArray<PKPikmin *> *roster) {
     PKTroopCounts troop = pkTroopCounts();
     NSSet<NSString *> *members = pkTroopMembers(roster);
     int minTroop = pkMinTroop();
-    NSSet<NSString *> *elite = pkTroopElite(roster);
 
-    // Who the troop pass would put in the troop (same inputs, same answer).
-    NSMutableArray<PKPikmin *> *movable = [NSMutableArray array];
-    int busyInTroop = 0;
-    for (PKPikmin *p in roster) {
-        if (p.status == PK_STATUS_TASK) { if ([members containsObject:p.pid]) busyInTroop++; continue; }
-        [movable addObject:p];
-    }
-    NSMutableSet<NSString *> *wanted = [NSMutableSet set];
-    for (PKPikmin *p in pkTroopPlan(roster, movable, (NSUInteger)MAX(troop.max - busyInTroop, 0), NULL)) [wanted addObject:p.pid];
+    NSMutableSet<NSString *> *wanted = [NSMutableSet set];          // who the troop pass would put in the troop (same inputs, same answer)
+    for (PKPikmin *p in pkTroopWanted(roster, members, troop.max, NULL, NULL, NULL)) [wanted addObject:p.pid];
 
-    NSMutableArray<PKPikmin *> *plain = [NSMutableArray array], *spare = [NSMutableArray array], *held4troop = [NSMutableArray array];
-    int nBusy = 0, nStarred = 0;
-    for (PKPikmin *p in roster) {
-        if (p.status == PK_STATUS_TASK || p.status == 0) { nBusy++; continue; }
-        if (p.starred) { nStarred++; continue; }
-        if ([wanted containsObject:p.pid]) [held4troop addObject:p];
-        else if ([elite containsObject:p.pid]) [spare addObject:p];
-        else [plain addObject:p];
-    }
-    [plain sortUsingComparator:^NSComparisonResult(PKPikmin *a, PKPikmin *b) {
-        if (a.hearts != b.hearts) return a.hearts > b.hearts ? NSOrderedAscending : NSOrderedDescending;
-        return [a.pid compare:b.pid];
-    }];
-    [spare sortUsingComparator:^NSComparisonResult(PKPikmin *a, PKPikmin *b) {
-        if (a.hearts != b.hearts) return a.hearts < b.hearts ? NSOrderedAscending : NSOrderedDescending;
-        return [a.pid compare:b.pid];
-    }];
-    NSMutableArray<PKPikmin *> *pool = [NSMutableArray arrayWithArray:plain];
-    [pool addObjectsFromArray:spare];
-    BOOL onlyTroop = NO;
-    if (!pool.count) { [pool addObjectsFromArray:held4troop]; onlyTroop = YES; }   // never stall completely
-
-    int poolInTroop = 0;
-    for (PKPikmin *p in pool) if ([members containsObject:p.pid]) poolInTroop++;
-    int need = poolInTroop - troop.total + minTroop;
-    NSMutableArray<PKPikmin *> *out = [NSMutableArray array];
-    int held = 0;
-    for (PKPikmin *p in pool) {
-        if (need > 0 && held < need && [members containsObject:p.pid]) { held++; continue; }
-        [out addObject:p];
-    }
-
+    PKPoolStats st;
+    NSArray<PKPikmin *> *out = pkExpeditionPool(roster, members, troop.total, minTroop, wanted, pkTroopElite(roster), &st);
     if (!out.count)
         PKLOGC(@"exp.nopool", ([NSString stringWithFormat:@"[탐험] 후보0 — 전체 %lu, 작업중제외 %d, 즐겨찾기제외 %d, 부대배정제외 %lu, 부대유보 %d/%d (부대 %d, 최소 %d)",
-              (unsigned long)roster.count, nBusy, nStarred, (unsigned long)held4troop.count, held, need, troop.total, minTroop]));
+              (unsigned long)roster.count, st.busy, st.starred, (unsigned long)st.heldForTroop, st.reserved, st.need, troop.total, minTroop]));
     else
         PKLOGC(@"exp.pool", ([NSString stringWithFormat:@"[탐험] 후보 %lu마리 (일반 %lu · 정예 %lu · 부대배정 제외 %lu%@, 부대유보 %d, 부대 %d, 최소 %d)",
-                              (unsigned long)out.count, (unsigned long)plain.count, (unsigned long)spare.count, (unsigned long)held4troop.count,
-                              onlyTroop ? @" → 배정자만 남아 포함" : @"", held, troop.total, minTroop]));
+                              (unsigned long)out.count, (unsigned long)st.plain, (unsigned long)st.spare, (unsigned long)st.heldForTroop,
+                              st.onlyTroop ? @" → 배정자만 남아 포함" : @"", st.reserved, troop.total, minTroop]));
     return out;
 }
 

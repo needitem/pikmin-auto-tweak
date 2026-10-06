@@ -7,3 +7,4 @@ Support/ChangeGate.mm
 Model/RosterReport.mm
 Model/SeedValue.mm
 Model/NectarKind.mm
+Model/ExpeditionPool.mm

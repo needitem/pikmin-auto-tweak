@@ -35,21 +35,13 @@ NSString *pkTroopPass(void) {
     NSSet<NSString *> *members = pkTroopMembers(roster);
 
     NSMutableSet<NSString *> *alive = [NSMutableSet set];
-    NSMutableArray<PKPikmin *> *elig = [NSMutableArray array];
-    int busyInTroop = 0;
-    for (PKPikmin *p in roster) {
-        [alive addObject:p.pid];
-        if (p.status == PK_STATUS_TASK) {                 // busy on a task — cannot be moved,
-            if ([members containsObject:p.pid]) busyInTroop++;   // but it still occupies a troop slot
-            continue;
-        }
-        [elig addObject:p];
-    }
+    for (PKPikmin *p in roster) [alive addObject:p.pid];
     [backoff() pruneKeeping:alive];
 
-    NSUInteger slots = (NSUInteger)MAX(counts.max - busyInTroop, 0);
+    NSArray<PKPikmin *> *elig = nil;
+    int busyInTroop = 0;
     NSString *plan = nil;
-    NSArray<PKPikmin *> *want = pkTroopPlan(roster, elig, slots, &plan);
+    NSArray<PKPikmin *> *want = pkTroopWanted(roster, members, counts.max, &elig, &busyInTroop, &plan);
     PKLOGC(@"troop.plan", ([NSString stringWithFormat:@"[부대] 배정: %@", plan]));
     NSMutableSet<NSString *> *wantIds = [NSMutableSet set];
     for (PKPikmin *p in want) [wantIds addObject:p.pid];

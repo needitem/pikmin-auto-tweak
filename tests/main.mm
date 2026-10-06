@@ -12,6 +12,8 @@ void test_pacer_stale_request_is_forced(void); void test_pacer_stats(void);
 void test_passtimings(void);
 void test_seed_tier(void); void test_seed_compare(void); void test_seed_compare_unknown_colour(void); void test_seed_sort(void);
 void test_nectar_kind(void);
+void test_pool_order_and_exclusions(void); void test_pool_excludes_troop_plan(void); void test_pool_falls_back_to_troop(void);
+void test_pool_troop_reservation(void); void test_troop_wanted_busy_takes_a_place(void);
 void test_hash(void); void test_changegate(void);
 void test_roster_json_is_valid_and_complete(void); void test_roster_json_escapes_names(void);
 void test_roster_json_handles_bad_numbers_and_empty(void); void test_roster_summary(void); void test_roster_signature(void);
@@ -32,6 +34,8 @@ int main(void) {
         RUN(test_passtimings);
         RUN(test_seed_tier); RUN(test_seed_compare); RUN(test_seed_compare_unknown_colour); RUN(test_seed_sort);
         RUN(test_nectar_kind);
+        RUN(test_pool_order_and_exclusions); RUN(test_pool_excludes_troop_plan); RUN(test_pool_falls_back_to_troop);
+        RUN(test_pool_troop_reservation); RUN(test_troop_wanted_busy_takes_a_place);
         RUN(test_hash); RUN(test_changegate);
         RUN(test_roster_json_is_valid_and_complete); RUN(test_roster_json_escapes_names);
         RUN(test_roster_json_handles_bad_numbers_and_empty); RUN(test_roster_summary); RUN(test_roster_signature);

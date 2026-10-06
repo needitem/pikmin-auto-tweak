@@ -136,3 +136,19 @@ NSArray<PKPikmin *> *pkTroopPlan(NSArray<PKPikmin *> *roster, NSArray<PKPikmin *
     }
     return chosen;
 }
+
+NSArray<PKPikmin *> *pkTroopWanted(NSArray<PKPikmin *> *roster, NSSet<NSString *> *members, int troopMax,
+                                   NSArray<PKPikmin *> **movable, int *busyInTroop, NSString **summary) {
+    NSMutableArray<PKPikmin *> *elig = [NSMutableArray array];
+    int busy = 0;
+    for (PKPikmin *p in roster) {
+        if (p.status == PK_STATUS_TASK) {                         // busy on a task: cannot be moved,
+            if ([members containsObject:p.pid]) busy++;           // but it still occupies a troop place
+            continue;
+        }
+        [elig addObject:p];
+    }
+    if (movable) *movable = elig;
+    if (busyInTroop) *busyInTroop = busy;
+    return pkTroopPlan(roster, elig, (NSUInteger)MAX(troopMax - busy, 0), summary);
+}

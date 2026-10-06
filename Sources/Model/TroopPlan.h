@@ -29,6 +29,15 @@ NSDictionary<NSNumber *, NSNumber *> *pkColorNeed(NSArray<PKPikmin *> *roster);
 // Ids of each colour's elite (top kTroopEliteQuota by hearts).
 NSSet<NSString *> *pkTroopElite(NSArray<PKPikmin *> *roster);
 
+// The plan for one moment, from the inputs the game gives: the roster, who is in
+// the troop now, and the troop's size. A Pikmin busy on a task cannot be moved but
+// still holds its troop place, so it takes one of the places off the top.
+//   `movable`      out: who may be moved now (everyone not busy)
+//   `busyInTroop`  out: busy members of the troop
+// Returns who the troop should hold, most wanted first.
+NSArray<PKPikmin *> *pkTroopWanted(NSArray<PKPikmin *> *roster, NSSet<NSString *> *members, int troopMax,
+                                   NSArray<PKPikmin *> **movable, int *busyInTroop, NSString **summary);
+
 // `roster`: every Pikmin owned (it defines each colour's standing).
 // `movable`: the ones that may be moved right now (not on a task).
 // `slots`: troop places available to them.
