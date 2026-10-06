@@ -8,3 +8,4 @@ Model/RosterReport.mm
 Model/SeedValue.mm
 Model/NectarKind.mm
 Model/ExpeditionPool.mm
+Support/Bisect.mm
