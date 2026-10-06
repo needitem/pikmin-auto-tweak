@@ -99,9 +99,9 @@ NSString *pkFeedPass(void) {
             if (p.num >= petalCap) { NSString *k = pkBucketOfPetal(p); if (k) [capped addObject:k]; }
 
     NSMutableArray<PKPikmin *> *buds = [NSMutableArray array], *flowers = [NSMutableArray array];
-    int nCapped = 0, nPickSkipped = 0, nWaiting = 0;
+    int nCapped = 0, nWaiting = 0;
     for (PKPikmin *p in squad) {
-        if (p.flowerState == PK_PF_PICK || p.flowerState == PK_PF_WILTED) { nPickSkipped++; continue; }
+        if (p.flowerState == PK_PF_PICK || p.flowerState == PK_PF_WILTED) continue;   // the harvest pass's business
         if (p.flowerState != PK_PF_LEAF && p.flowerState != PK_PF_BUD && p.flowerState != PK_PF_FLOWER) continue;   // unknown head: leave it
         if (p.flowerState == PK_PF_FLOWER) {
             NSString *bk = pkBucketOfBloom(p);
@@ -112,8 +112,6 @@ NSString *pkFeedPass(void) {
     }
     PKLOGC(@"feed.petalcap", ([NSString stringWithFormat:@"[feed] 꽃잎상한 %d · 꽉찬 버킷 %lu개 · 상한제외 %d마리 · 결과대기 %d (먹일 봉오리 %lu · 꽃 %lu)",
                                petalCap, (unsigned long)capped.count, nCapped, nWaiting, (unsigned long)buds.count, (unsigned long)flowers.count]));
-    if (nPickSkipped && ![PKSettings boolForKey:kKeyHarvest])
-        PKLOGC(@"feed.nopick", ([NSString stringWithFormat:@"[feed] 수확이 꺼져 있어 수확 대기 %d마리는 급식 제외 — 수확을 켜면 처리됨", nPickSkipped]));
 
     // One budget per stack, shared by both groups, so a stack is never spent twice.
     NSMutableDictionary<NSString *, NSNumber *> *remaining = [NSMutableDictionary dictionary];
@@ -138,23 +136,33 @@ NSString *pkFeedPass(void) {
         return done;
     };
 
-    // Buds/leaves take special nectar (or plain when we hold none); skip a stack
-    // whose flower bucket is already at the cap.
+    // Buds/leaves take special nectar; plain when we hold none — or when every
+    // special stack is held back because its flower's petals are at the cap
+    // (that nectar would only overflow the harvest). Without that fallback a
+    // squad of buds sat unfed beside hundreds of plain nectar.
     NSMutableArray<PKNectar *> *budStacks = [NSMutableArray array];
-    for (PKNectar *h in (special.count ? special : plain)) {
-        NSString *bk = pkBucketOfNectar(h);
-        if (bk && [capped containsObject:bk]) {
-            PKLOGC(@"feed.budcap", ([NSString stringWithFormat:@"[feed] 정수 %@(색%d k%d) 버킷 상한 → 이 정수는 봉오리에 안 씀",
-                                     h.kindName, h.type, h.hkind]));
-            continue;
+    NSMutableArray<NSString *> *held = [NSMutableArray array];
+    void (^addUsable)(NSArray<PKNectar *> *) = ^(NSArray<PKNectar *> *stacks) {
+        for (PKNectar *h in stacks) {
+            NSString *bk = pkBucketOfNectar(h);
+            if (bk && [capped containsObject:bk]) {
+                [held addObject:[NSString stringWithFormat:@"%@(색%d)", h.kindName.length ? h.kindName : @"일반", h.type]];
+                continue;
+            }
+            [budStacks addObject:h];
         }
-        [budStacks addObject:h];
-    }
+    };
+    addUsable(special);
+    BOOL plainForBuds = NO;
+    if (!budStacks.count) { plainForBuds = special.count > 0; addUsable(plain); }
+    if (held.count)
+        PKLOGC(@"feed.budcap", ([NSString stringWithFormat:@"[feed] 버킷 상한이라 봉오리에 안 쓰는 정수 %lu종: %@%@", (unsigned long)held.count,
+                                 [held componentsJoinedByString:@", "], plainForBuds ? @" → 일반 정수로 대체" : @""]));
     int fedBud = feed(buds, budStacks);
     int fedFlower = feed(flowers, plain);
     PKNectar *sp = special.firstObject;
     return [NSString stringWithFormat:@"🍯 봉오리/잎 %d마리%@ · 꽃 %d마리(일반) / 일반 %lld 특수 %lld",
             fedBud,
-            sp ? [NSString stringWithFormat:@"(특수 %@)", sp.kindName.length ? sp.kindName : [NSString stringWithFormat:@"kind%d", sp.hkind]] : @"(일반)",
+            sp && !plainForBuds ? [NSString stringWithFormat:@"(특수 %@)", sp.kindName.length ? sp.kindName : [NSString stringWithFormat:@"kind%d", sp.hkind]] : @"(일반)",
             fedFlower, totPlain, totSpecial];
 }
