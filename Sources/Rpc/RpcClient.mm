@@ -4,6 +4,17 @@
 #import "Log.h"
 
 // RpcManager.Send<Name>Rpc[ForResult]Async(request, CancellationToken.None, RpcRetryPolicy).
+static NSMutableDictionary<NSString *, NSNumber *> *gSent;    // main thread only, like every pass
+
+NSString *pkRpcStats(void) {
+    if (!gSent.count) return @"-";
+    NSMutableArray *bits = [NSMutableArray array];
+    for (NSString *k in [gSent.allKeys sortedArrayUsingSelector:@selector(compare:)])
+        [bits addObject:[NSString stringWithFormat:@"%@ %@", k, gSent[k]]];
+    [gSent removeAllObjects];
+    return [bits componentsJoinedByString:@", "];
+}
+
 static BOOL sendRpc(const char *rpcMethod, void *req) {
     void *rpc = pkRpc();
     if (!rpc || !req) return NO;
@@ -15,6 +26,9 @@ static BOOL sendRpc(const char *rpcMethod, void *req) {
     void *args[3] = { req, ct, &retry };
     BOOL ok = NO;
     pkInvokeEx(m, rpc, args, &ok);
+    if (!gSent) gSent = [NSMutableDictionary dictionary];
+    NSString *key = @(rpcMethod);
+    gSent[key] = @(gSent[key].intValue + 1);
     return ok;
 }
 

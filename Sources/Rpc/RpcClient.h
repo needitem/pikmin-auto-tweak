@@ -10,6 +10,9 @@
 #pragma once
 #import <Foundation/Foundation.h>
 
+// "Name n, …" of the requests sent since the previous call (main thread), then reset.
+NSString *pkRpcStats(void);
+
 BOOL pkRpcFeed(NSArray<NSString *> *pikminIds, NSString *nectarItemId, int numItems);
 BOOL pkRpcRename(NSString *pikminId, NSString *name);
 BOOL pkRpcCompleteTask(NSString *taskId);

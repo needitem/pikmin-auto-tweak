@@ -9,6 +9,9 @@
 // from the maintenance tick until the game's classes have loaded.
 void pkInstallHooks(void);
 
+// "name calls, …" per hook since the previous call, busiest first (heartbeat).
+NSString *pkHookStats(void);
+
 // While set, PikminCameraController.SetTarget is swallowed so automated
 // feeds/harvests do not yank the camera.
 void pkSetCameraSuppress(BOOL suppress);
