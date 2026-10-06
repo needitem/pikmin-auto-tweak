@@ -24,7 +24,12 @@
 // game after each whether the party is strong enough — so the party is the
 // smallest one the game accepts.
 
-static const int kExpPerPass = 4;
+// One start per pass (the pass runs every 8 s). Four at once were sent in a
+// single tick, and every freeze of the game we could attribute (10/2, 10/6, and
+// the one on 10/6 09:51, a second after four starts) came within seconds of an
+// expedition start: the game builds the party, its map objects and its UI for
+// each one on the main thread.
+static const int kExpPerPass = 1;
 
 // A task the server keeps refusing must not be retried forever: the wait
 // triples with each attempt that left it Available, up to an hour.
