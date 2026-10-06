@@ -13,6 +13,9 @@
 //
 // Not covered: whether a decor category is already complete (the grey/yellow
 // icon). The picture-book object could not be found in the game yet.
+//
+// Pure (no game access). Reading the game's seedlings into PKSeedTraits is
+// SeedReader's job.
 #pragma once
 #import <Foundation/Foundation.h>
 
@@ -25,8 +28,11 @@ typedef struct {
     int req;            // steps to ripen
 } PKSeedTraits;
 
-// Reads a PikminSeedProto (a pass-scoped pointer).
-PKSeedTraits pkSeedTraits(void *seedProto);
+// Which tier a seedling belongs to, from three facts about it:
+//   treasureType  the decor it is fixed to (0 = none) — golden and the like
+//   hasEvent      it carries an event id
+//   large         the catalog calls its type Large
+int pkSeedTier(int treasureType, BOOL hasEvent, BOOL large);
 
 // `need`: colour -> how much the roster still wants it (pkColorNeed).
 // Lower value = plant / fetch first.

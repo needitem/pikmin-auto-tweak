@@ -4,6 +4,7 @@
 #import "GameContext.h"
 #import "Log.h"
 #import "Nectar.h"
+#import "NectarSelection.h"
 #import "Petals.h"
 #import "Roster.h"
 #import "RpcClient.h"

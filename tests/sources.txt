@@ -5,3 +5,5 @@ App/Governor.mm
 Rpc/RpcPacer.mm
 Support/ChangeGate.mm
 Model/RosterReport.mm
+Model/SeedValue.mm
+Model/NectarKind.mm

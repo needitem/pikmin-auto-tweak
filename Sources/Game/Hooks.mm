@@ -1,7 +1,7 @@
 #import "Hooks.h"
 #import "GameContext.h"
 #import "Log.h"
-#import "Nectar.h"
+#import "NectarSelection.h"
 #import "Runtime.h"
 
 static BOOL gCamSuppress = NO;

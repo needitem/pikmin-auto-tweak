@@ -1,6 +1,8 @@
-// The nectar (HoneyBall) inventory and which stack the player has chosen.
+// The nectar (HoneyBall) inventory. Which stack the player has chosen is
+// NectarSelection's business; what counts as special is NectarKind's.
 #pragma once
 #import <Foundation/Foundation.h>
+#import "NectarKind.h"
 
 @interface PKNectar : NSObject
 @property (nonatomic, copy) NSString *itemId;     // names one stack: colour AND flower kind
@@ -17,15 +19,3 @@ NSArray<PKNectar *> *pkNectarList(void);
 
 // Plain (no flower kind) predicted nectar by colour index 1..4.
 void pkNectarPlainByColor(long long out[8]);
-
-// A named flower (rose, canna, …) is the special sort that decides what a bud
-// opens into; kind 5 is ordinary nectar.
-BOOL pkNectarIsSpecial(NSString *flowerName, int honeyFlowerKind);
-
-// The player's manual feed reveals which stack they mean. Any thread.
-// From a hook (any thread): the nectar item id the player just fed by hand, copied
-// as raw UTF-16 — no allocation, no il2cpp call. The feed pass picks it up.
-void pkNoteHandFedRaw(void *il2cppItemIdString);
-// Pin the special nectar to spend from the player's own choices (hand feed +
-// the reel selection). Main thread; call before reading the pin.
-void pkNectarSyncSelection(void);

@@ -5,6 +5,7 @@
 #import "GameContext.h"
 #import "Layout.h"
 #import "Log.h"
+#import "SeedReader.h"
 #import "SeedValue.h"
 #import "Roster.h"
 #import "Troop.h"

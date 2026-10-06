@@ -6,6 +6,7 @@
 #import "Location.h"
 #import "Log.h"
 #import "Roster.h"
+#import "SeedReader.h"
 #import "SeedValue.h"
 #import "TroopPlan.h"
 #import "RpcClient.h"
