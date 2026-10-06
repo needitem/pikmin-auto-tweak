@@ -3,6 +3,9 @@
 // handle so the collector cannot free it under us, and REPLACED when the game
 // hands us a different instance (re-login, scene reload) instead of keeping
 // the first one forever.
+//
+// Hooks only REMEMBER a pointer (pkCapture); the main thread adopts it between
+// passes (pkAdoptCaptured), which is where the GC handle work happens.
 #pragma once
 #import <Foundation/Foundation.h>
 
@@ -18,7 +21,8 @@ typedef enum {
     PKS_COUNT
 } PKSlotId;
 
-void pkCapture(PKSlotId slot, void *instance, const char *via);   // any thread
+void pkCapture(PKSlotId slot, void *instance, const char *via);   // any thread; only remembers
+void pkAdoptCaptured(void);                                         // main thread, outside any pass; needs the bridge armed
 void *pkGet(PKSlotId slot);
 
 static inline void *pkRpc(void)      { return pkGet(PKS_RPC); }

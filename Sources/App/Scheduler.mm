@@ -23,6 +23,7 @@ static const NSTimeInterval kStartupQuiet = 75.0;
 static const double kStallThreshold = 0.2;
 static const NSTimeInterval kCalmHold = 3.0, kMaxHold = 15.0;
 static NSTimeInterval gStartedAt = 0, gCalmAfter = 0;
+static BOOL gRestagger = YES;                     // spread the passes' next runs (launch, and every return to the app)
 static int gHeldTicks = 0;
 
 BOOL pkMainThreadCalm(void) { return pkMono() >= gCalmAfter; }
@@ -89,7 +90,9 @@ void pkSchedulerTick(void) {
     if (!appActive()) return;
     NSTimeInterval now = pkMono();
     if (now - last < kTickGap) return;
+    if (last > 0 && now - last > 10.0) gRestagger = YES;     // came back from the background / a long stall
     last = now;
+    if (pkRuntimeReady()) pkAdoptCaptured();
     if (!started) {
         // Phase the periodic work so it does not all land on one tick: the two
         // dumps used to fire together with the 30 s passes.
@@ -113,6 +116,17 @@ void pkSchedulerTick(void) {
         if (now - heldSince < kMaxHold) { gHeldTicks++; return; }
     }
     heldSince = 0;
+
+    if (gRestagger) {
+        // Every pass is overdue after the quiet period or a stay in the background;
+        // run them all in one tick and the game takes ninety requests at once.
+        // Give each its own phase, as at first start.
+        gRestagger = NO;
+        NSUInteger i = 0;
+        for (PKFeature *f in pkFeatures()) { f.lastRun = now - f.pace + fmod(1.0 + 2.0 * (double)i, f.pace); i++; }
+        lastMap = now - kMapPace + 11.0;
+        lastRoster = now - kRosterPace + 23.0;
+    }
 
     // One frame for the whole tick: every pass that runs now shares one roster
     // / squad / nectar / petal scan (runFeature nests inside it).
@@ -149,10 +163,12 @@ static void maintenance(void) {
     // Only runs that did real work are recorded, so the [hb] ms/calls reads as
     // the cost of one run.
     NSTimeInterval t0 = pkMono();
+    if (pkRuntimeReady()) pkAdoptCaptured();
     pkInstallHooks();
     NSTimeInterval t1 = pkMono();
     if (t1 - t0 >= 0.001) noteMs(@"훅", t1 - t0);
     if (pkResolveSingletons()) noteMs(@"finder", pkMono() - t1);   // adopt what the hooks have not caught
+    if (pkRuntimeReady()) pkAdoptCaptured();                        // ... and what the finder just found
     if (++beat % 60) return;
     static NSArray *therm = @[ @"정상", @"주의", @"높음", @"위험" ];
     UIDevice.currentDevice.batteryMonitoringEnabled = YES;
